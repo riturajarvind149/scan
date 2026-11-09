@@ -8,20 +8,30 @@
     "apps/*"
   ],
   "scripts": {
-    "dev:server": "npm run build:types && npm run dev -w apps/server",
-    "dev:web": "npm run build:types && npm run dev -w apps/web",
-    "dev:desktop": "npm run build:types && npm run dev -w apps/desktop",
-    "build:types": "npm run build -w packages/shared-types",
-    "build:server": "npm run build:types && npm run build -w apps/server",
-    "build:web": "npm run build:types && npm run build -w apps/web",
-    "build:desktop": "npm run build:types && npm run build -w apps/desktop",
-    "build": "npm run build:types && npm run build:server && npm run build:web && npm run build:desktop",
-    "typecheck": "npm run typecheck -w packages/shared-types && npm run typecheck -w apps/server && npm run typecheck -w apps/web && npm run typecheck -w apps/desktop",
-    "test": "npm run test -w apps/server",
-    "test:all": "npm run test -w apps/server"
+    "build:packages": "npm run build -w packages/shared-types && npm run build -w packages/relay-core",
+    "build:server": "npm run build:packages && npm run build -w apps/server",
+    "build:web": "npm run build:packages && npm run build -w apps/web",
+    "build:desktop": "npm run build:packages && npm run build -w apps/web && npm run build -w apps/desktop",
+    "build": "npm run build:packages && npm run build -w apps/server && npm run build -w apps/web && npm run build -w apps/desktop",
+    "dev:server": "npm run build:packages && npm run dev -w apps/server",
+    "dev:web": "npm run build:packages && npm run dev -w apps/web",
+    "dev:desktop": "npm run build:desktop && npm run start -w apps/desktop",
+    "start": "npm run start -w apps/server",
+    "package:desktop": "npm run build:desktop && npm run package -w apps/desktop",
+    "typecheck": "npm run build:packages && npm run typecheck -w apps/server && npm run typecheck -w apps/web && npm run typecheck -w apps/desktop",
+    "test": "vitest run",
+    "test:e2e": "npm run build && node e2e/run.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "happy-dom": "^21.0.4",
+    "jsqr": "^1.4.0",
+    "playwright-core": "^1.65.0",
+    "pngjs": "^7.0.0",
+    "vite": "^8.3.6",
+    "vitest": "^4.1.12"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.19.0"
   }
 }
-

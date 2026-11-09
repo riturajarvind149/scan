@@ -1,26 +1,14 @@
+// Emits the CommonJS entry point from the real source so its constants can never drift.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const distDir = path.join(__dirname, 'dist');
+const root = path.dirname(fileURLToPath(import.meta.url));
+const source = fs.readFileSync(path.join(root, 'src', 'index.ts'), 'utf-8');
+const { outputText } = ts.transpileModule(source, {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+});
 
-if (!fs.existsSync(distDir)) {
-  fs.mkdirSync(distDir, { recursive: true });
-}
-
-const cjsContent = `"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-exports.PAIRING_CODE_LENGTH = 6;
-exports.PAIRING_CODE_EXPIRY_MS = 5 * 60 * 1000;
-exports.MAX_IMAGE_PAYLOAD_BYTES = 5 * 1024 * 1024;
-exports.MAX_IMAGE_DIMENSION = 4096;
-exports.ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
-exports.WS_HEARTBEAT_INTERVAL_MS = 30000;
-exports.TOKEN_LENGTH = 64;
-exports.RATE_LIMIT_SCANS_PER_MINUTE = 30;
-`;
-
-fs.writeFileSync(path.join(distDir, 'index.cjs'), cjsContent, 'utf-8');
-console.log('[shared-types] Generated dist/index.cjs (CommonJS)');
-
+fs.mkdirSync(path.join(root, 'dist'), { recursive: true });
+fs.writeFileSync(path.join(root, 'dist', 'index.cjs'), outputText, 'utf-8');

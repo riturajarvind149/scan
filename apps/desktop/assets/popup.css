@@ -1,0 +1,65 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font: 13px 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+  color: #1c2024;
+  background: #fff;
+  border: 1px solid #c9ced6;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 4px 4px 14px;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+
+h1 { font-size: 13px; font-weight: 600; }
+
+button {
+  -webkit-app-region: no-drag;
+  width: 36px;
+  height: 32px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+button:hover { background: #c42b1c; color: #fff; }
+button:focus-visible { outline: 2px solid #2563eb; }
+
+main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 14px;
+}
+
+/* White behind the image keeps the quiet zone intact, so the code stays scannable from the screen. */
+img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  background: #fff;
+}
+
+footer {
+  padding: 10px 14px 12px;
+  color: #5b6470;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

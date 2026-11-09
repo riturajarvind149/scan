@@ -1,413 +1,272 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   app,
   BrowserWindow,
-  Tray,
-  Menu,
-  Notification,
   ipcMain,
+  Menu,
   nativeImage,
-  screen,
+  Notification,
+  powerMonitor,
+  shell,
+  Tray,
+  type IpcMainEvent,
+  type IpcMainInvokeEvent,
 } from 'electron';
-import path from 'node:path';
-import fs from 'node:fs';
 import QRCode from 'qrcode';
-import { ConnectionManager } from './connection';
-import { LocalServer } from './local-server';
+import type { PhoneSummary } from '@qr2win/shared-types';
+import type { ChannelEvents, ChannelMode } from './channel';
+import { InternetChannel } from './internet-channel';
+import { LocalChannel } from './local-channel';
+import { isLoopbackUrl, normalizeServerUrl } from './network';
+import { ScanPresenter } from './scan-presenter';
 import { SettingsStore } from './settings';
-import type { QrImagePayload } from '@qr2win/shared-types';
+
+const APP_ID = 'com.qr2win.desktop';
+/** Fixed for this app: Windows looks it up from the shortcut, so it must not change between runs. */
+const TOAST_ACTIVATOR_CLSID = '{7E0C6A52-3B1F-4D8E-9A61-2F4C8B7D1E93}';
+const START_HIDDEN_ARG = '--hidden';
+
+// An explicit data directory lets several isolated instances run, which the end-to-end test needs.
+const userDataOverride = app.commandLine.getSwitchValue('user-data-dir');
+if (userDataOverride) app.setPath('userData', userDataOverride);
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
-const qrPopups = new Map<string, BrowserWindow>();
-const connectionManager = new ConnectionManager();
-const localServer = new LocalServer();
-const settings = new SettingsStore();
+let isQuitting = false;
+let settings: SettingsStore;
+let presenter: ScanPresenter;
+let local: LocalChannel;
+let internet: InternetChannel;
 
-function getAssetPath(...paths: string[]): string {
-  // In dev: dist/main -> ../../assets
-  const devPath = path.join(__dirname, '..', '..', 'assets', ...paths);
-  if (fs.existsSync(devPath)) return devPath;
+const assetPath = (...parts: string[]): string => path.join(app.getAppPath(), 'assets', ...parts);
 
-  // In packaged app / dist-relative: dist/main -> ../assets
-  const distPath = path.join(__dirname, '..', 'assets', ...paths);
-  if (fs.existsSync(distPath)) return distPath;
-
-  // Fallback to app path
-  return path.join(app.getAppPath(), 'assets', ...paths);
+function showMainWindow(): void {
+  if (!mainWindow) return;
+  mainWindow.show();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.focus();
 }
 
-function getIconPath(): string {
-  return getAssetPath('icon.png');
-}
-
-function createMainWindow(): BrowserWindow {
+function createMainWindow(startHidden: boolean): BrowserWindow {
   const win = new BrowserWindow({
-    width: 500,
-    height: 700,
-    minWidth: 400,
-    minHeight: 550,
+    width: 460,
+    height: 760,
+    minWidth: 380,
+    minHeight: 520,
     title: 'QR-to-Windows-11',
-    icon: getIconPath(),
+    icon: assetPath('icon.ico'),
+    show: false,
+    autoHideMenuBar: true,
+    backgroundColor: '#f5f6f8',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
     },
-    show: false,
   });
-
-  win.loadFile(getAssetPath('index.html'));
-
-  // Security: restrict navigation
-  win.webContents.on('will-navigate', (event) => {
-    event.preventDefault();
-  });
-
+  win.setMenu(null);
+  void win.loadFile(assetPath('index.html'));
+  win.webContents.on('will-navigate', (event) => event.preventDefault());
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-
   win.on('close', (event) => {
-    // Minimize to tray instead of closing
-    event.preventDefault();
-    win.hide();
+    // Closing the window leaves the app running in the tray so scans keep arriving.
+    if (!isQuitting) {
+      event.preventDefault();
+      win.hide();
+    }
   });
-
-  win.once('ready-to-show', () => {
-    win.show();
-  });
-
+  if (!startHidden) win.once('ready-to-show', () => win.show());
   return win;
 }
 
-function getOrCreateQrPopup(payload: QrImagePayload): BrowserWindow {
-  const existing = qrPopups.get(payload.scanId);
-  if (existing && !existing.isDestroyed()) {
-    existing.show();
-    existing.focus();
-    existing.setAlwaysOnTop(true, 'screen-saver');
-    return existing;
-  }
-
-  const display = screen.getPrimaryDisplay();
-  const { width: screenW, height: screenH } = display.workAreaSize;
-  const popupW = 360;
-  const popupH = 420;
-
-  // Cascade offset if multiple popups are open
-  const offset = (qrPopups.size % 5) * 24;
-  const popupX = screenW - popupW - 20 - offset;
-  const popupY = screenH - popupH - 20 - offset;
-
-  const popup = new BrowserWindow({
-    width: popupW,
-    height: popupH,
-    x: popupX,
-    y: popupY,
-    frame: false,
-    alwaysOnTop: true,
-    resizable: false,
-    skipTaskbar: false,
-    transparent: false,
-    backgroundColor: '#1e293b',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
+function buildState() {
+  return {
+    local: { ...local.getState(), enabled: settings.localEnabled },
+    internet: {
+      ...internet.getState(),
+      unreachableByPhones: !!settings.serverUrl && isLoopbackUrl(settings.serverUrl),
     },
-  });
-
-  popup.setAlwaysOnTop(true, 'screen-saver');
-  popup.loadFile(getAssetPath('popup.html'));
-
-  popup.webContents.once('did-finish-load', () => {
-    popup.webContents.send('qr-image-data', {
-      scanId: payload.scanId,
-      mimeType: payload.mimeType,
-      imageBase64: payload.imageBase64,
-      decodedText: payload.decodedText,
-      width: payload.width,
-      height: payload.height,
-      timestamp: payload.timestamp,
-    });
-  });
-
-  popup.on('closed', () => {
-    qrPopups.delete(payload.scanId);
-  });
-
-  qrPopups.set(payload.scanId, popup);
-  return popup;
+    scans: presenter.getHistory(),
+    startWithWindows: app.getLoginItemSettings(loginItemOptions()).openAtLogin,
+    canAutoStart: app.isPackaged,
+  };
 }
 
-function showQrNotification(payload: QrImagePayload): void {
-  const popup = getOrCreateQrPopup(payload);
+function broadcastState(): void {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('state-changed', buildState());
+  updateTray();
+}
 
-  if (Notification.isSupported()) {
-    const notification = new Notification({
-      title: 'QR Code Received',
-      body: `Scanned: ${payload.decodedText.length > 60 ? payload.decodedText.slice(0, 60) + '…' : payload.decodedText}`,
-      icon: getIconPath(),
-      silent: false,
-    });
-
-    notification.on('click', () => {
-      if (!popup.isDestroyed()) {
-        popup.show();
-        popup.focus();
-        popup.setAlwaysOnTop(true, 'screen-saver');
-      } else {
-        getOrCreateQrPopup(payload);
-      }
-    });
-
-    notification.show();
-  }
+function updateTray(): void {
+  if (!tray) return;
+  const channels = [local.getState().status, internet.getState().status];
+  const label = channels.includes('connected') ? 'Ready to receive scans' : 'Not connected';
+  tray.setToolTip(`QR-to-Windows-11: ${label}`);
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label, enabled: false },
+      { type: 'separator' },
+      { label: 'Show latest QR code', enabled: presenter.hasScans(), click: () => presenter.openLatest() },
+      { label: 'Open QR-to-Windows-11', click: showMainWindow },
+      { type: 'separator' },
+      { label: 'Quit', click: () => app.quit() },
+    ]),
+  );
 }
 
 function createTray(): void {
-  const iconPath = getIconPath();
-  tray = new Tray(nativeImage.createFromPath(iconPath));
+  tray = new Tray(nativeImage.createFromPath(assetPath('icon.ico')));
+  tray.on('click', showMainWindow);
+  updateTray();
+}
 
-  const contextMenu = Menu.buildFromTemplate([
-    {
-      label: 'Show Window',
-      click: () => {
-        mainWindow?.show();
-        mainWindow?.focus();
-      },
-    },
-    { type: 'separator' },
-    {
-      label: 'Quit',
-      click: () => {
-        app.exit(0);
-      },
-    },
-  ]);
+function loginItemOptions() {
+  // While running unpackaged, the executable is Electron itself and needs the app path too.
+  return { path: process.execPath, args: app.isPackaged ? [START_HIDDEN_ARG] : [app.getAppPath(), START_HIDDEN_ARG] };
+}
 
-  tray.setToolTip('QR-to-Windows-11');
-  tray.setContextMenu(contextMenu);
+function fromTrustedPage(event: IpcMainInvokeEvent | IpcMainEvent): boolean {
+  return event.senderFrame?.url.startsWith('file://') ?? false;
+}
 
-  tray.on('click', () => {
-    mainWindow?.show();
-    mainWindow?.focus();
+/** Registers a handler that only answers the app's own bundled pages. */
+function handle<A extends unknown[], R>(channel: string, handler: (...args: A) => R | Promise<R>): void {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!fromTrustedPage(event)) throw new Error('Rejected call from an untrusted page');
+    return handler(...(args as A));
   });
 }
 
-// ─── IPC Handlers ──────────────────────────────────────────────────────
+function assertMode(mode: unknown): asserts mode is ChannelMode {
+  if (mode !== 'local' && mode !== 'internet') throw new Error('Unknown connection mode');
+}
 
-function setupIPC(): void {
-  // Settings
-  ipcMain.handle('get-settings', () => {
-    return settings.getAll();
+function setupIpc(): void {
+  handle('get-state', buildState);
+
+  handle('create-pairing', async (mode: ChannelMode, address?: string) => {
+    assertMode(mode);
+    const pairing = mode === 'local' ? await local.createPairing(address) : await internet.createPairing();
+    const qrDataUrl = await QRCode.toDataURL(pairing.url, { width: 280, margin: 2, errorCorrectionLevel: 'M' });
+    return { ...pairing, qrDataUrl, mode };
   });
 
-  ipcMain.handle('save-settings', (_event, data) => {
-    settings.setAll(data);
-    return true;
+  handle('unpair-phone', async (mode: ChannelMode, phoneId: string) => {
+    assertMode(mode);
+    if (typeof phoneId !== 'string') throw new Error('Invalid phone');
+    if (mode === 'local') local.unpair(phoneId);
+    else await internet.unpair(phoneId);
   });
 
-  ipcMain.handle('get-start-with-windows', () => {
-    try {
-      return app.getLoginItemSettings().openAtLogin;
-    } catch {
-      return false;
-    }
+  handle('set-server-url', (input: string) => {
+    if (typeof input !== 'string') throw new Error('Invalid address');
+    settings.serverUrl = input.trim() ? normalizeServerUrl(input) : '';
+    internet.start();
+    return settings.serverUrl;
   });
 
-  ipcMain.handle('set-start-with-windows', (_event, enabled: boolean) => {
-    try {
-      app.setLoginItemSettings({
-        openAtLogin: enabled,
-        path: process.execPath,
-      });
-      settings.setAll({ startWithWindows: enabled });
-      return app.getLoginItemSettings().openAtLogin;
-    } catch (err: any) {
-      console.warn('[desktop] Failed to set login item settings:', err.message);
-      return false;
-    }
+  handle('set-local-enabled', async (enabled: boolean) => {
+    settings.localEnabled = !!enabled;
+    if (settings.localEnabled) await local.start();
+    else await local.stop();
   });
 
-  // Generate pairing code + pairing QR
-  ipcMain.handle('generate-pairing-code', async () => {
-    const deviceId = settings.getDesktopDeviceId();
-    const serverUrl = settings.getServerUrl();
-
-    if (!serverUrl) {
-      return { error: 'Server URL not configured' };
-    }
-
-    try {
-      const response = await fetch(`${serverUrl}/api/pairing/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ desktopDeviceId: deviceId }),
-      });
-
-      if (!response.ok) {
-        return { error: `Server returned ${response.status}: ${response.statusText}` };
-      }
-
-      const data = await response.json();
-
-      // Generate a QR code containing pairing info for phone scanner
-      const pairingPayload = JSON.stringify({
-        type: 'qr2win-pair',
-        server: serverUrl,
-        code: data.code,
-      });
-
-      const qrDataUrl = await QRCode.toDataURL(pairingPayload, {
-        width: 220,
-        margin: 2,
-        color: { dark: '#0f172a', light: '#ffffff' },
-      });
-
-      return { ...data, qrDataUrl };
-    } catch (err: any) {
-      return { error: `Failed to connect to server at ${serverUrl}: ${err.message}` };
-    }
+  handle('set-start-with-windows', (enabled: boolean) => {
+    app.setLoginItemSettings({ ...loginItemOptions(), openAtLogin: !!enabled });
+    broadcastState();
   });
 
-  // Connect to server
-  ipcMain.handle('connect-server', async (_event, serverUrl: string, token: string) => {
-    try {
-      const wsUrl = serverUrl.replace(/^http/, 'ws').replace(/\/+$/, '') + '/ws';
-      connectionManager.connect(wsUrl, token, 'desktop');
-      return { success: true };
-    } catch (err: any) {
-      return { error: err.message };
-    }
+  handle('open-scan', (scanId: string) => {
+    if (typeof scanId === 'string') presenter.openPopup(scanId);
   });
 
-  // Disconnect
-  ipcMain.handle('disconnect-server', () => {
-    connectionManager.disconnect();
-    return { success: true };
+  ipcMain.handle('get-popup-scan', (event) => {
+    if (!fromTrustedPage(event)) return null;
+    const win = BrowserWindow.fromWebContents(event.sender);
+    return win ? presenter.scanForWindow(win) : null;
   });
 
-  // Get connection status
-  ipcMain.handle('get-connection-status', () => {
-    return connectionManager.getStatus();
-  });
-
-  // Start local server
-  ipcMain.handle('start-local-server', async () => {
-    try {
-      const info = await localServer.start();
-      const primaryAddress = info.addresses[0] || `localhost:${info.port}`;
-      const pairingPayload = JSON.stringify({
-        type: 'qr2win-pair',
-        server: `http://${primaryAddress}`,
-        code: info.pairingCode,
-      });
-
-      const qrDataUrl = await QRCode.toDataURL(pairingPayload, {
-        width: 220,
-        margin: 2,
-        color: { dark: '#0f172a', light: '#ffffff' },
-      });
-
-      return { ...info, qrDataUrl };
-    } catch (err: any) {
-      return { error: err.message };
-    }
-  });
-
-  // Stop local server
-  ipcMain.handle('stop-local-server', () => {
-    localServer.stop();
-    return { success: true };
-  });
-
-  // Get local server info
-  ipcMain.handle('get-local-server-info', () => {
-    return localServer.getInfo();
-  });
-
-  // Close popup
   ipcMain.on('close-popup', (event) => {
-    const popup = BrowserWindow.fromWebContents(event.sender);
-    if (popup) {
-      popup.close();
-    }
-  });
-
-  // Revoke token
-  ipcMain.handle('revoke-token', async (_event, token: string) => {
-    const serverUrl = settings.getServerUrl();
-    if (!serverUrl) return { error: 'No server configured' };
-
-    try {
-      const response = await fetch(`${serverUrl}/api/pairing/revoke`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token }),
-      });
-      return await response.json();
-    } catch (err: any) {
-      return { error: err.message };
-    }
+    if (fromTrustedPage(event)) BrowserWindow.fromWebContents(event.sender)?.close();
   });
 }
 
-// ─── QR event handler ──────────────────────────────────────────────────
-function onQrReceived(payload: QrImagePayload): void {
-  console.log(`[desktop] QR received: scanId=${payload.scanId}`);
-  showQrNotification(payload);
-
-  // Notify main window
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('qr-received', {
-      scanId: payload.scanId,
-      decodedText: payload.decodedText,
-      timestamp: payload.timestamp,
-    });
+function onPhonePaired(phone: PhoneSummary, mode: ChannelMode): void {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('phone-paired', { ...phone, mode });
+  // Tell the user about every new pairing, so an unexpected phone is noticed and can be removed.
+  if (Notification.isSupported()) {
+    new Notification({
+      title: 'New phone paired',
+      body: `${phone.name} can now send QR codes to this PC. If this wasn't you, remove it in the app.`,
+      icon: assetPath('icon.ico'),
+    }).show();
   }
 }
 
-// ─── App lifecycle ─────────────────────────────────────────────────────
+/**
+ * Windows delivers toast clicks through a COM activator named on the Start Menu shortcut. The
+ * installer's shortcut only carries the app id, so without this toasts appear but clicks do nothing.
+ */
+function registerToastShortcut(): void {
+  if (!app.isPackaged) return;
+  const shortcut = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'QR-to-Windows-11.lnk');
+  const options = { target: process.execPath, appUserModelId: APP_ID, toastActivatorClsid: TOAST_ACTIVATOR_CLSID };
+  if (!shell.writeShortcutLink(shortcut, fs.existsSync(shortcut) ? 'update' : 'create', options)) {
+    console.warn('[desktop] Could not update the Start Menu shortcut; clicking notifications may not work.');
+  }
+}
 
-app.whenReady().then(() => {
-  mainWindow = createMainWindow();
+function start(): void {
+  registerToastShortcut();
+  settings = new SettingsStore();
+  presenter = new ScanPresenter(assetPath, assetPath('icon.ico'), broadcastState, showMainWindow);
+  Notification.handleActivation((details) => presenter.handleToastActivation(details.arguments));
+  const events: ChannelEvents = {
+    onScan: (scan, ack) => presenter.receive(scan, ack),
+    onPhonePaired,
+    onChange: broadcastState,
+  };
+  local = new LocalChannel(settings, events);
+  internet = new InternetChannel(settings, events);
+
+  setupIpc();
+  mainWindow = createMainWindow(process.argv.includes(START_HIDDEN_ARG));
   createTray();
-  setupIPC();
 
-  // Listen for QR images from both connection types
-  connectionManager.onQrImage(onQrReceived);
-  localServer.onQrImage(onQrReceived);
+  if (settings.localEnabled) void local.start();
+  internet.start();
 
-  // Auto-connect if settings exist
-  const token = settings.getToken();
-  const serverUrl = settings.getServerUrl();
-  if (token && serverUrl) {
-    const wsUrl = serverUrl.replace(/^http/, 'ws').replace(/\/+$/, '') + '/ws';
-    connectionManager.connect(wsUrl, token, 'desktop');
-  }
-});
+  powerMonitor.on('resume', () => internet.reconnectNow());
+}
 
-app.on('window-all-closed', () => {
-  // Keep running in tray – don't quit
-});
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  // Windows matches toasts to the app through this id; without it they can go missing.
+  app.setAppUserModelId(app.isPackaged ? APP_ID : process.execPath);
+  app.setToastActivatorCLSID(TOAST_ACTIVATOR_CLSID);
 
-app.on('before-quit', () => {
-  connectionManager.disconnect();
-  localServer.stop();
-  if (mainWindow) {
-    mainWindow.removeAllListeners('close');
-    mainWindow.close();
-  }
-  for (const popup of qrPopups.values()) {
-    if (!popup.isDestroyed()) popup.close();
-  }
-});
+  app.on('second-instance', showMainWindow);
+  app.whenReady().then(start).catch((err) => {
+    console.error('[desktop] Failed to start:', err);
+    app.exit(1);
+  });
 
-app.on('activate', () => {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    mainWindow = createMainWindow();
-  } else {
-    mainWindow.show();
-  }
-});
+  // The app lives in the tray, so having no windows is normal.
+  app.on('window-all-closed', () => undefined);
+
+  let shutdownDone = false;
+  app.on('before-quit', (event) => {
+    isQuitting = true;
+    if (shutdownDone || !local) return;
+    event.preventDefault();
+    presenter.closeAll();
+    internet.stop();
+    void local.stop().finally(() => {
+      shutdownDone = true;
+      app.quit();
+    });
+  });
+}

@@ -1,72 +1,63 @@
-import { useState, useCallback } from 'react';
-import { QrScanner } from './components/QrScanner';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { parsePairingHash } from '@qr2win/shared-types';
 import { PairingScreen } from './components/PairingScreen';
-import { StatusBar } from './components/StatusBar';
-import { useConnection } from './hooks/useConnection';
-
-type Screen = 'pairing' | 'scanner';
+import { ScannerScreen } from './components/ScannerScreen';
+import {
+  clearPairing,
+  loadPairing,
+  requestPairing,
+  requestUnpair,
+  savePairing,
+  suggestDeviceName,
+  type Pairing,
+} from './lib/pairing';
 
 export default function App() {
-  const [screen, setScreen] = useState<Screen>(() => {
-    // Check if already paired
-    const token = sessionStorage.getItem('qr2win_token');
-    return token ? 'scanner' : 'pairing';
-  });
+  const [pairing, setPairing] = useState<Pairing | null>(loadPairing);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const handledLink = useRef(false);
 
-  const {
-    connectionState,
-    sendQrImage,
-    connect,
-    disconnect,
-  } = useConnection();
-
-  const handlePaired = useCallback((token: string, serverUrl: string) => {
-    sessionStorage.setItem('qr2win_token', token);
-    sessionStorage.setItem('qr2win_server', serverUrl);
-    connect(serverUrl, token);
-    setScreen('scanner');
-  }, [connect]);
-
-  const handleUnpair = useCallback(() => {
-    disconnect();
-    sessionStorage.removeItem('qr2win_token');
-    sessionStorage.removeItem('qr2win_server');
-    setScreen('pairing');
-  }, [disconnect]);
-
-  // Auto-connect on mount if token exists
-  useState(() => {
-    const token = sessionStorage.getItem('qr2win_token');
-    const serverUrl = sessionStorage.getItem('qr2win_server');
-    if (token && serverUrl) {
-      connect(serverUrl, token);
+  const pair = useCallback(async (code: string, deviceName: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const created = await requestPairing(code, deviceName);
+      savePairing(created);
+      setPairing(created);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
     }
-  });
+  }, []);
 
-  return (
-    <div style={styles.container}>
-      <StatusBar
-        state={connectionState}
-        onUnpair={screen === 'scanner' ? handleUnpair : undefined}
-      />
-      {screen === 'pairing' ? (
-        <PairingScreen onPaired={handlePaired} />
-      ) : (
-        <QrScanner
-          onScan={sendQrImage}
-          connectionState={connectionState}
-        />
-      )}
-    </div>
-  );
+  // The phone's own camera app opens the pairing QR as a link, so the code arrives in the URL.
+  useEffect(() => {
+    if (handledLink.current) return;
+    handledLink.current = true;
+    const code = parsePairingHash(window.location.hash);
+    if (!code) return;
+    // Drop the code from the address bar and history; it is single use anyway.
+    window.history.replaceState(null, '', window.location.pathname);
+    void pair(code, suggestDeviceName());
+  }, [pair]);
+
+  const unpair = useCallback(() => {
+    if (pairing) void requestUnpair(pairing.token);
+    clearPairing();
+    setPairing(null);
+    setError(null);
+  }, [pairing]);
+
+  const onRevoked = useCallback(() => {
+    clearPairing();
+    setPairing(null);
+    setError('This phone was unpaired. Pair it again to keep scanning.');
+  }, []);
+
+  if (pairing) {
+    return <ScannerScreen key={pairing.token} pairing={pairing} notice={error} onUnpair={unpair} onRevoked={onRevoked} />;
+  }
+  return <PairingScreen busy={busy} error={error} onPair={pair} />;
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    height: '100%',
-    display: 'flex',
-    flexDirection: 'column',
-    background: '#0f172a',
-  },
-};
-
