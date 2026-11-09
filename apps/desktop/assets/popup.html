@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+  <title>QR Code</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', Tahoma, sans-serif;
+      background: #1e293b;
+      color: #e2e8f0;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+      border-radius: 12px;
+      border: 1px solid #334155;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 14px;
+      background: #0f172a;
+      -webkit-app-region: drag;
+      border-bottom: 1px solid #334155;
+    }
+    .header h3 { font-size: 14px; font-weight: 600; }
+    .close-btn {
+      -webkit-app-region: no-drag;
+      background: #dc2626;
+      border: none;
+      color: #fff;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      font-size: 16px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+    }
+    .close-btn:hover { background: #b91c1c; }
+    .image-container {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      overflow: hidden;
+    }
+    .image-container img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      border-radius: 8px;
+      image-rendering: pixelated; /* Keep QR codes crisp */
+    }
+    .footer {
+      padding: 10px 14px;
+      background: #0f172a;
+      border-top: 1px solid #334155;
+      font-size: 12px;
+      color: #94a3b8;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .loading {
+      color: #64748b;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h3>📷 QR Code Received</h3>
+    <button class="close-btn" id="closeBtn" title="Close">×</button>
+  </div>
+  <div class="image-container" id="imageContainer">
+    <span class="loading">Loading QR image…</span>
+  </div>
+  <div class="footer" id="footer">
+    Waiting for data…
+  </div>
+
+  <script>
+    const api = window.electronAPI;
+    const imageContainer = document.getElementById('imageContainer');
+    const footer = document.getElementById('footer');
+    const closeBtn = document.getElementById('closeBtn');
+
+    closeBtn.addEventListener('click', () => {
+      api.closePopup();
+    });
+
+    api.onQrImageData((data) => {
+      const img = document.createElement('img');
+      img.src = 'data:' + data.mimeType + ';base64,' + data.imageBase64;
+      img.alt = 'Scanned QR Code';
+      imageContainer.innerHTML = '';
+      imageContainer.appendChild(img);
+
+      const time = new Date(data.timestamp).toLocaleTimeString();
+      const text = data.decodedText.length > 50
+        ? data.decodedText.slice(0, 50) + '…'
+        : data.decodedText;
+
+      // Safety: display as text, never as a link
+      footer.textContent = time + ' — ' + text;
+    });
+  </script>
+</body>
+</html>
+

@@ -1,0 +1,27 @@
+{
+  "name": "qr-to-windows-11",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Scan QR codes on your phone, receive them instantly on your Windows 11 desktop.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:server": "npm run build:types && npm run dev -w apps/server",
+    "dev:web": "npm run build:types && npm run dev -w apps/web",
+    "dev:desktop": "npm run build:types && npm run dev -w apps/desktop",
+    "build:types": "npm run build -w packages/shared-types",
+    "build:server": "npm run build:types && npm run build -w apps/server",
+    "build:web": "npm run build:types && npm run build -w apps/web",
+    "build:desktop": "npm run build:types && npm run build -w apps/desktop",
+    "build": "npm run build:types && npm run build:server && npm run build:web && npm run build:desktop",
+    "typecheck": "npm run typecheck -w packages/shared-types && npm run typecheck -w apps/server && npm run typecheck -w apps/web && npm run typecheck -w apps/desktop",
+    "test": "npm run test -w apps/server",
+    "test:all": "npm run test -w apps/server"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+
