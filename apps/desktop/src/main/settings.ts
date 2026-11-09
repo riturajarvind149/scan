@@ -11,6 +11,8 @@ interface StoredSettings {
   localPort: number;
   /** The relay credential, encrypted with the Windows user's key (DPAPI). */
   internetCredential: { desktopId: string; encryptedToken: string } | null;
+  /** Show codes in the always-on-top live window instead of raising notifications. */
+  liveView: boolean;
   /** Whether "start with Windows" got its on-by-default value, which is only done once. */
   autoStartInitialized: boolean;
 }
@@ -20,6 +22,7 @@ const DEFAULTS: StoredSettings = {
   localEnabled: true,
   localPort: 3002,
   internetCredential: null,
+  liveView: false,
   autoStartInitialized: false,
 };
 
@@ -64,6 +67,15 @@ export class SettingsStore {
 
   set localEnabled(enabled: boolean) {
     this.data.localEnabled = enabled;
+    this.save();
+  }
+
+  get liveView(): boolean {
+    return this.data.liveView;
+  }
+
+  set liveView(enabled: boolean) {
+    this.data.liveView = enabled;
     this.save();
   }
 

@@ -5,8 +5,6 @@ import {
   AUTH_TIMEOUT_MS,
   MAX_WS_MESSAGE_BYTES,
   OPEN_CONNECTIONS_PER_IP,
-  OPEN_SCANS_PER_MINUTE,
-  RATE_LIMIT_SCANS_PER_MINUTE,
   WS_CLOSE_AUTH_TIMEOUT,
   WS_CLOSE_UNAUTHORIZED,
   WS_HEARTBEAT_INTERVAL_MS,
@@ -30,8 +28,8 @@ const AUTH_FAILURES_PER_MINUTE = 20;
 /** A connected desktop or phone: a WebSocket, or the in-process desktop of a local relay. */
 interface Peer {
   identity: Identity;
-  /** Whose allowance a scan spends. Anonymous phones can reconnect at will, so theirs is per IP. */
-  rateKey?: string;
+  /** A phone on the public link, which the admin's pause switch applies to. */
+  anonymous?: boolean;
   send(message: ServerMessage): void;
   close(code: number, reason: string): void;
 }
@@ -43,9 +41,7 @@ export class Hub {
   private alive = new WeakSet<WebSocket>();
   /** Scans already forwarded, so a retry is re-acked rather than shown twice. */
   private scans = new Map<string, { at: number; acked: boolean; phoneId: string }>();
-  private scanLimiter = new RateLimiter(RATE_LIMIT_SCANS_PER_MINUTE, 60_000);
   private authLimiter = new RateLimiter(AUTH_FAILURES_PER_MINUTE, 60_000);
-  private openLimiter = new RateLimiter(OPEN_SCANS_PER_MINUTE, 60_000);
   private openConnections = new Map<string, number>();
   private wss: WebSocketServer | null = null;
   private heartbeat: ReturnType<typeof setInterval>;
@@ -216,7 +212,7 @@ export class Hub {
       if (remaining > 0) this.openConnections.set(ip, remaining);
       else this.openConnections.delete(ip);
     });
-    this.addSocketPeer(ws, { role: 'phone', desktopId: accountId, phoneId: `open-${crypto.randomUUID()}` }, `ip:${ip}`);
+    this.addSocketPeer(ws, { role: 'phone', desktopId: accountId, phoneId: `open-${crypto.randomUUID()}` }, true);
     return true;
   }
 
@@ -231,10 +227,10 @@ export class Hub {
     return true;
   }
 
-  private addSocketPeer(ws: WebSocket, identity: Identity, rateKey?: string): void {
+  private addSocketPeer(ws: WebSocket, identity: Identity, anonymous = false): void {
     const peer: Peer = {
       identity,
-      rateKey,
+      anonymous,
       send: (message) => this.sendRaw(ws, message),
       close: (code, reason) => ws.close(code, reason),
     };
@@ -272,7 +268,7 @@ export class Hub {
       return;
     }
 
-    if (peer.rateKey && this.store.scansPaused) {
+    if (peer.anonymous && this.store.scansPaused) {
       this.sendError(peer, 'Scanning is paused by the administrator.', 'SCANS_PAUSED', scan.scanId);
       return;
     }
@@ -283,12 +279,6 @@ export class Hub {
       peer.send({ type: 'qr-ack', scanId: scan.scanId });
       return;
     }
-    // Retries of a scan already counted do not spend the sender's allowance.
-    if (!known && (!this.scanLimiter.allow(peer.rateKey ?? identity.phoneId) || (peer.rateKey && !this.openLimiter.allow('all')))) {
-      this.sendError(peer, 'Too many scans; slow down', 'RATE_LIMIT', scan.scanId);
-      return;
-    }
-
     const desktops = this.desktopPeers(identity.desktopId);
     if (desktops.length === 0) {
       peer.send({ type: 'scan-deferred', scanId: scan.scanId });

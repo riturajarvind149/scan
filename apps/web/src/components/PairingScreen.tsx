@@ -16,8 +16,9 @@ export function PairingScreen({ busy, error, onPair }: PairingScreenProps) {
   const [scanHint, setScanHint] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  const camera = useQrCamera(videoRef, scanning, (result) => {
-    const pairing = parsePairingUrl(result.data);
+  const camera = useQrCamera(videoRef, scanning, (detections) => {
+    const [first] = detections;
+    const pairing = parsePairingUrl(first.text);
     if (!pairing) {
       setScanHint("That isn't a pairing code. Point the camera at the QR code in the desktop app.");
       return;
@@ -27,7 +28,7 @@ export function PairingScreen({ busy, error, onPair }: PairingScreenProps) {
       onPair(pairing.code, deviceName);
     } else {
       // The code belongs to another relay, such as this laptop's Wi-Fi server. Pair there instead.
-      window.location.assign(result.data);
+      window.location.assign(first.text);
     }
   });
 

@@ -13,7 +13,7 @@ const ACK_TIMEOUT_MS = 10_000;
 const MAX_SEND_ATTEMPTS = 3;
 /** Unsent scans are kept this long, so a QR captured while the laptop sleeps still arrives. */
 const MAX_PENDING_AGE_MS = 5 * 60 * 1000;
-const MAX_PENDING = 10;
+const MAX_PENDING = 50;
 const VISIBLE_HISTORY = 5;
 
 export type ScanStatus = 'sending' | 'waiting' | 'delivered' | 'failed';

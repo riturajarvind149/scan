@@ -2,7 +2,10 @@ import { BrowserWindow, Notification, screen } from 'electron';
 import path from 'node:path';
 import { validateQrPayload, type QrImagePayload } from '@qr2win/shared-types';
 
-const HISTORY_LIMIT = 20;
+const HISTORY_LIMIT = 50;
+const LIVE_TILES = 6;
+const LIVE_WIDTH = 720;
+const LIVE_HEIGHT = 560;
 const SEEN_LIMIT = 500;
 const POPUP_WIDTH = 360;
 const POPUP_HEIGHT = 440;
@@ -26,6 +29,7 @@ export class ScanPresenter {
    */
   private notifications: Notification[] = [];
   private lastInstanceClickAt = 0;
+  private live: BrowserWindow | null = null;
 
   constructor(
     private readonly assetPath: (...parts: string[]) => string,
@@ -33,6 +37,8 @@ export class ScanPresenter {
     private readonly onChange: () => void,
     /** A toast was clicked but there is no scan to show, as after a restart. */
     private readonly onEmptyActivation: () => void,
+    /** The person closed the live window, which turns live view off. */
+    private readonly onLiveClosed: () => void,
   ) {}
 
   receive(scan: QrImagePayload, ack: () => void): void {
@@ -50,7 +56,8 @@ export class ScanPresenter {
 
     this.history.unshift(scan);
     this.history.length = Math.min(this.history.length, HISTORY_LIMIT);
-    this.notify(scan);
+    if (this.live && !this.live.isDestroyed()) this.live.webContents.send('live-scan', scan);
+    else this.notify(scan);
     ack();
     this.onChange();
   }
@@ -90,6 +97,60 @@ export class ScanPresenter {
     return this.history.length > 0;
   }
 
+  /** Opens or closes the always-on-top window showing codes as they arrive. */
+  setLiveView(enabled: boolean): void {
+    if (!enabled) {
+      const live = this.live;
+      this.live = null;
+      if (live && !live.isDestroyed()) live.destroy();
+      return;
+    }
+    if (this.live && !this.live.isDestroyed()) {
+      this.live.show();
+      return;
+    }
+    const { workArea } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    const live = new BrowserWindow({
+      width: LIVE_WIDTH,
+      height: LIVE_HEIGHT,
+      minWidth: 320,
+      minHeight: 280,
+      x: Math.round(workArea.x + workArea.width - LIVE_WIDTH - 24),
+      y: Math.round(workArea.y + 24),
+      alwaysOnTop: true,
+      autoHideMenuBar: true,
+      show: false,
+      title: 'QR codes, live',
+      icon: this.iconPath,
+      backgroundColor: '#ffffff',
+      webPreferences: {
+        preload: path.join(__dirname, 'live-preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+    live.setMenu(null);
+    live.setAlwaysOnTop(true, 'screen-saver');
+    live.webContents.on('will-navigate', (event) => event.preventDefault());
+    live.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    // Without taking focus, so a code arriving doesn't interrupt whatever is being typed.
+    live.once('ready-to-show', () => live.showInactive());
+    live.on('closed', () => {
+      if (this.live === live) {
+        this.live = null;
+        this.onLiveClosed();
+      }
+    });
+    this.live = live;
+    void live.loadFile(this.assetPath('live.html'));
+  }
+
+  /** The newest codes, for the live window to start with. */
+  getLiveScans(): QrImagePayload[] {
+    return this.history.slice(0, LIVE_TILES);
+  }
+
   /** The scan a popup window displays. */
   scanForWindow(win: BrowserWindow): QrImagePayload | null {
     for (const [scanId, popup] of this.popups) {
@@ -103,6 +164,7 @@ export class ScanPresenter {
       if (!popup.isDestroyed()) popup.destroy();
     }
     this.popups.clear();
+    this.setLiveView(false);
   }
 
   private notify(scan: QrImagePayload): void {

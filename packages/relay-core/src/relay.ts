@@ -35,11 +35,12 @@ export interface Relay {
 
 const PHONE_APP_CSP = [
   "default-src 'self'",
-  "script-src 'self'",
-  // qr-scanner runs its decoder in a blob worker and styles its overlay inline.
-  "worker-src 'self' blob:",
+  // The QR decoder is WebAssembly, which needs this and nothing broader.
+  "script-src 'self' 'wasm-unsafe-eval'",
+  "worker-src 'self'",
+  // React's style attribute, used for the camera zoom.
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
+  "img-src 'self' data:",
   "media-src 'self' blob:",
   "connect-src 'self' ws: wss:",
   "base-uri 'none'",

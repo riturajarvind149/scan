@@ -142,10 +142,10 @@ describe('PhoneClient', () => {
   it('surfaces a rejection for a specific scan', () => {
     const { client, socket } = connectedClient();
     client.sendScan(payload('scan-0005'));
-    socket.receive({ type: 'error', code: 'RATE_LIMIT', message: 'Too many scans; slow down', scanId: 'scan-0005' });
+    socket.receive({ type: 'error', code: 'SCANS_PAUSED', message: 'Scanning is paused', scanId: 'scan-0005' });
     const [scan] = client.getSnapshot().scans;
     expect(scan.status).toBe('failed');
-    expect(scan.message).toMatch(/slow down/);
+    expect(scan.message).toMatch(/paused/);
     client.stop();
   });
 

@@ -122,6 +122,7 @@ function render(next) {
   renderAddresses();
   renderPhones();
   renderScans();
+  $('liveView').checked = state.liveView;
   $('localEnabled').checked = state.local.enabled;
   $('startWithWindows').checked = state.startWithWindows;
   $('autoStartRow').hidden = !state.canAutoStart;
@@ -208,6 +209,7 @@ $('showPairing').addEventListener('click', showPairing);
 $('address').addEventListener('change', () => {
   if (!$('pairing').hidden) showPairing();
 });
+$('liveView').addEventListener('change', (event) => api.setLiveView(event.target.checked));
 $('localEnabled').addEventListener('change', (event) => api.setLocalEnabled(event.target.checked));
 $('startWithWindows').addEventListener('change', (event) => api.setStartWithWindows(event.target.checked));
 
