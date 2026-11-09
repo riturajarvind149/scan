@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { MAX_DECODED_TEXT_LENGTH } from '@qr2win/shared-types';
 import { useQrCamera } from '../hooks/useQrCamera';
-import { copyRegion, cropRegion, encodeQuickly, encodeRawImage, readPixels } from '../lib/capture';
+import { copyRegion, cropRegion, encodeQuickly, encodeRawImage, readPixels, type Point } from '../lib/capture';
 import { sharpnessScore, type Detection } from '../lib/enhance';
 import { type Pairing, WS_URL } from '../lib/pairing';
 import { PhoneClient, type ClientState, type ScanEntry } from '../lib/phone-client';
@@ -14,8 +14,12 @@ const SAME_CODE_COOLDOWN_MS = 3000;
  * for the straightened copy before showing its popup, so this stays short.
  */
 const BEST_FRAME_WINDOW_MS = 150;
+/**
+ * After a scan the camera freezes until Rescan is tapped, so one code isn't sent over and over. This
+ * short wait first lets other codes in the same view through, and finds the sharpest frame.
+ */
+const FREEZE_AFTER_MS = 400;
 const VISIBLE_RESULTS = 2;
-const TICK_VISIBLE_MS = 1500;
 
 interface ScannerScreenProps {
   /** Null when the relay's link is public, so there is nothing to pair or unpair. */
@@ -31,6 +35,8 @@ interface PendingCapture {
   crop: HTMLCanvasElement;
   score: number;
   text: string;
+  /** Where the code is in `crop`. */
+  corners: Point[];
 }
 
 function newScanId(): string {
@@ -61,13 +67,14 @@ function scanLabel(scan: ScanEntry): string {
 export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerScreenProps) {
   const client = useMemo(() => new PhoneClient(WS_URL, pairing?.token ?? null), [pairing?.token]);
   const state = useSyncExternalStore(client.subscribe, client.getSnapshot);
-  /** Changes with each new scan, which replays the tick. Zero when it is hidden. */
-  const [tick, setTick] = useState(0);
-  const [canRescan, setCanRescan] = useState(false);
+  /** A code has been scanned, and nothing more goes out until Rescan. */
+  const [scanned, setScanned] = useState(false);
+  const [frozen, setFrozen] = useState(false);
+  const frozenNow = useRef(false);
+  const freezeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const screenRef = useRef<HTMLElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const lastSeen = useRef(new Map<string, number>());
-  const tickCount = useRef(0);
   const pending = useRef(new Map<string, PendingCapture>());
   const enhancer = useRef<ScannerClient | null>(null);
 
@@ -99,7 +106,7 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
       pending.current.delete(text);
       if (!enhancer.current) return;
       void enhancer.current
-        .enhance(readPixels(capture.crop), capture.text)
+        .enhance(readPixels(capture.crop), capture.text, capture.corners)
         .then((result) => {
           const encoded = result && encodeRawImage(result.image);
           if (!result || !encoded) return;
@@ -118,6 +125,7 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
 
   const onDetections = useCallback(
     (detections: Detection[], frame: HTMLCanvasElement) => {
+      if (frozenNow.current) return;
       const now = Date.now();
       for (const { text, corners } of detections) {
         const previous = lastSeen.current.get(text);
@@ -130,11 +138,13 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
         if (region.width < 1 || region.height < 1) continue;
         const crop = copyRegion(frame, region);
         const score = sharpnessScore(readPixels(crop));
+        const cornersInCrop = corners.map((point) => ({ x: point.x - region.x, y: point.y - region.y }));
         if (waiting) {
           // Already sent. Keep the sharpest view from the next few frames for the clearer copy.
           if (score > waiting.score) {
             waiting.crop = crop;
             waiting.score = score;
+            waiting.corners = cornersInCrop;
           }
           continue;
         }
@@ -143,9 +153,11 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
         if (!photo) continue;
         const scanId = newScanId();
         navigator.vibrate?.(40);
-        tickCount.current += 1;
-        setTick(tickCount.current);
-        setCanRescan(true);
+        setScanned(true);
+        freezeTimer.current ??= setTimeout(() => {
+          frozenNow.current = true;
+          setFrozen(true);
+        }, FREEZE_AFTER_MS);
         client.sendScan({
           type: 'qr-image',
           scanId,
@@ -156,7 +168,7 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
           imageBase64: photo.base64,
           decodedText: text.slice(0, MAX_DECODED_TEXT_LENGTH),
         });
-        pending.current.set(text, { scanId, crop, score, text });
+        pending.current.set(text, { scanId, crop, score, text, corners: cornersInCrop });
         setTimeout(() => enhanceInBackground(text), BEST_FRAME_WINDOW_MS);
       }
       for (const [text, seenAt] of lastSeen.current) {
@@ -166,22 +178,26 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
     [client, enhanceInBackground],
   );
 
-  useEffect(() => {
-    if (tick === 0) return;
-    const timer = setTimeout(() => setTick(0), TICK_VISIBLE_MS);
-    return () => clearTimeout(timer);
-  }, [tick]);
+  useEffect(
+    () => () => {
+      if (freezeTimer.current) clearTimeout(freezeTimer.current);
+    },
+    [],
+  );
 
-  /** Forgets what has been sent, so a code still in view goes out again as a new scan. */
+  /** Restarts the camera and forgets what was sent, so a code still in view counts as a new scan. */
   const rescan = () => {
     // A scan still choosing its sharpest frame finishes now, or it would absorb the new one.
     for (const text of [...pending.current.keys()]) enhanceInBackground(text);
     lastSeen.current.clear();
-    setTick(0);
-    setCanRescan(false);
+    if (freezeTimer.current) clearTimeout(freezeTimer.current);
+    freezeTimer.current = null;
+    frozenNow.current = false;
+    setFrozen(false);
+    setScanned(false);
   };
 
-  const camera = useQrCamera(videoRef, true, onDetections);
+  const camera = useQrCamera(videoRef, true, onDetections, frozen);
   const zoomControl = useRef(camera.zoom);
   zoomControl.current = camera.zoom;
 
@@ -256,8 +272,8 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
         </div>
         {!camera.running && !camera.error ? <p className="viewfinder-note">Starting camera…</p> : null}
         {camera.error ? <p className="viewfinder-note error" role="alert">{camera.error}</p> : null}
-        {tick > 0 ? (
-          <svg key={tick} className="scan-tick" viewBox="0 0 96 96" aria-hidden="true">
+        {scanned ? (
+          <svg className="scan-tick" viewBox="0 0 96 96" aria-hidden="true">
             <circle cx="48" cy="48" r="48" />
             <path d="M26 50 l15 15 l29 -32" />
           </svg>
@@ -277,7 +293,7 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
       </div>
 
       <div className="rescan-row">
-        <button type="button" className="rescan" disabled={!canRescan} onClick={rescan}>
+        <button type="button" className="rescan" disabled={!scanned} onClick={rescan}>
           Rescan
         </button>
       </div>

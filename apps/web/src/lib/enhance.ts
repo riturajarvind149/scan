@@ -22,6 +22,16 @@ export type Decoder = (image: RawImage, thorough: boolean) => Promise<Detection[
 /** A second decoder sharing no code with the first, so both failing the same way is very unlikely. */
 export type IndependentDecoder = (image: RawImage) => string | null;
 
+/** The second decoder again, also saying where the code is. */
+export type IndependentLocator = (image: RawImage) => Detection | null;
+
+/** What else may help find the code when the main decoder cannot read the capture. */
+export interface LocateHelp {
+  locate?: IndependentLocator;
+  /** Where the live scan saw the code in this capture, which may have been the phone's own detector. */
+  corners?: Point[];
+}
+
 export interface EnhancedResult {
   image: RawImage;
   method: string;
@@ -45,6 +55,8 @@ const MIN_CHANNEL_RANGE = 12;
 const MONOCHROME_RATIO = 0.65;
 const NEUTRAL_DARK = 16;
 const NEUTRAL_LIGHT = 245;
+const ENLARGE_FACTOR = 3;
+const MAX_ENLARGED_CAPTURE = 700;
 
 function blank(width: number, height: number): RawImage {
   return { data: new Uint8ClampedArray(width * height * 4), width, height };
@@ -52,6 +64,47 @@ function blank(width: number, height: number): RawImage {
 
 function luminance(data: Uint8ClampedArray, at: number): number {
   return 0.299 * data[at] + 0.587 * data[at + 1] + 0.114 * data[at + 2];
+}
+
+/** Makes a small capture bigger, because decoders struggle when modules are only a few pixels wide. */
+function enlarge(source: RawImage, factor: number): RawImage {
+  const { data, width, height } = source;
+  const out = blank(width * factor, height * factor);
+  for (let y = 0; y < out.height; y++) {
+    const sy = Math.min(height - 1, Math.max(0, (y + 0.5) / factor - 0.5));
+    const y0 = Math.floor(sy);
+    const y1 = Math.min(height - 1, y0 + 1);
+    const fy = sy - y0;
+    for (let x = 0; x < out.width; x++) {
+      const sx = Math.min(width - 1, Math.max(0, (x + 0.5) / factor - 0.5));
+      const x0 = Math.floor(sx);
+      const x1 = Math.min(width - 1, x0 + 1);
+      const fx = sx - x0;
+      const at = (y * out.width + x) * 4;
+      for (let channel = 0; channel < 3; channel++) {
+        const top = data[(y0 * width + x0) * 4 + channel] * (1 - fx) + data[(y0 * width + x1) * 4 + channel] * fx;
+        const bottom = data[(y1 * width + x0) * 4 + channel] * (1 - fx) + data[(y1 * width + x1) * 4 + channel] * fx;
+        out.data[at + channel] = top * (1 - fy) + bottom * fy;
+      }
+      out.data[at + 3] = 255;
+    }
+  }
+  return out;
+}
+
+/** Finds the code in a capture, trying each way in turn. Only the location is used from this. */
+async function locateCode(crop: RawImage, expectedText: string, decode: Decoder, help: LocateHelp): Promise<Detection | null> {
+  const direct = (await decode(crop, true)).find((detection) => detection.text === expectedText);
+  if (direct) return direct;
+  if (Math.max(crop.width, crop.height) <= MAX_ENLARGED_CAPTURE) {
+    const enlarged = (await decode(enlarge(crop, ENLARGE_FACTOR), true)).find((detection) => detection.text === expectedText);
+    if (enlarged) {
+      return { ...enlarged, corners: enlarged.corners.map((point) => ({ x: point.x / ENLARGE_FACTOR, y: point.y / ENLARGE_FACTOR })) };
+    }
+  }
+  const located = help.locate?.(crop);
+  if (located?.text === expectedText) return located;
+  return help.corners?.length === 4 ? { text: expectedText, corners: help.corners, inverted: false } : null;
 }
 
 /** Solves the perspective transform taking the unit square to the given corners. */
@@ -313,8 +366,9 @@ export async function enhanceVerified(
   expectedText: string,
   decode: Decoder,
   independent: IndependentDecoder,
+  help: LocateHelp = {},
 ): Promise<EnhancedResult | null> {
-  const found = (await decode(crop, true)).find((detection) => detection.text === expectedText);
+  const found = await locateCode(crop, expectedText, decode, help);
   if (!found) return null;
 
   const rectified = rectify(crop, found.corners, found.inverted, found.modules);

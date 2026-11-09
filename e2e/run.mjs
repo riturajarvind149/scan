@@ -45,6 +45,14 @@ function recordUploads() {
   };
 }
 
+/** Keeps tapping Rescan, for the tests that need a stream of scans from one phone. */
+function keepRescanning() {
+  setInterval(() => {
+    const button = document.querySelector('button.rescan');
+    if (button && !button.disabled) button.click();
+  }, 2500);
+}
+
 /** Makes the simulated camera report zoom and brightness controls, and records what gets set. */
 function offerCameraControls() {
   window.cameraSettings = [];
@@ -152,9 +160,11 @@ async function launchDesktop(userData) {
     fs.mkdirSync(userData, { recursive: true });
     fs.writeFileSync(settingsFile, JSON.stringify({ serverUrl: '' }));
   }
+  // E2E_PACKAGED tests what people actually install, rather than the development build.
+  const packaged = process.env.E2E_PACKAGED ? path.join(ROOT, 'apps', 'desktop', 'release', 'win-unpacked', 'QR-to-Windows-11.exe') : null;
   const electronApp = await _electron.launch({
-    executablePath: require('electron'),
-    args: [path.join(ROOT, 'apps', 'desktop'), `--user-data-dir=${userData}`],
+    executablePath: packaged ?? require('electron'),
+    args: packaged ? [`--user-data-dir=${userData}`] : [path.join(ROOT, 'apps', 'desktop'), `--user-data-dir=${userData}`],
     env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' },
   });
   // Count every popup as the app opens it, including ones already closed, and any toast about a scan.
@@ -316,6 +326,7 @@ async function main() {
 
     // Accepting the certificate warning, as the user does once on their phone.
     const localContext = await browser.newContext({ ...IPHONE_SIZED, ignoreHTTPSErrors: true });
+    await localContext.addInitScript(keepRescanning);
     const localPhone = await localContext.newPage();
     watchPhone(localPhone);
     await localPhone.goto(localLink.url);
@@ -427,6 +438,7 @@ async function main() {
     ok('the app shows a plain QR of the link, with no code');
 
     const phoneOneContext = await browser.newContext(IPHONE_SIZED);
+    await phoneOneContext.addInitScript(keepRescanning);
     await phoneOneContext.addInitScript(recordUploads);
     const internetPhone = await phoneOneContext.newPage();
     watchPhone(internetPhone);
@@ -464,19 +476,25 @@ async function main() {
     assert.equal(await controlsPhone.$eval('.scan-tick circle', (circle) => getComputedStyle(circle).fill), 'rgb(22, 163, 74)');
     assert.ok(await rescanButton.isEnabled(), 'Rescan must be available after a scan');
     await controlsPhone.screenshot({ path: path.join(OUTPUT, 'scanner-tick.png') });
-    await until('the tick goes away by itself', async () => !(await controlsPhone.locator('.scan-tick').isVisible()) || (await controlsPhone.evaluate(() => window.uploads.length > 2)), 5000);
     ok('a scan shows a green tick in the scanner, with Rescan below it');
 
-    // Right after a scan its code is still in view and would normally not go out again for seconds.
-    // The camera's video moves on to other codes, so only the same text counts as a rescan.
-    const sent = () => controlsPhone.evaluate(() => window.uploads.filter((u) => u.type === 'qr-image').map((u) => u.text));
-    const sentBefore = (await sent()).length;
-    await until('another scan to rescan', async () => (await sent()).length > sentBefore, 40_000);
-    const sentSoFar = await sent();
+    // The simulated camera's video keeps moving through different codes, so a scanner still running
+    // would be sending them. Nothing going out for this long proves it has really stopped.
+    const sent = () => controlsPhone.evaluate(() => window.uploads.filter((u) => u.type === 'qr-image').length);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const sentWhenFrozen = await sent();
+    assert.equal(await controlsPhone.$eval('video', (video) => video.paused), true, 'the camera view must hold still');
+    await new Promise((resolve) => setTimeout(resolve, 12_000));
+    assert.equal(await sent(), sentWhenFrozen, 'nothing may be sent until Rescan');
+    assert.equal(await controlsPhone.locator('.scan-tick').count(), 1, 'the tick stays until Rescan');
+    ok('after a scan the camera holds still, the tick stays, and nothing more is sent');
+
     await rescanButton.click();
     assert.equal(await controlsPhone.locator('.scan-tick').count(), 0, 'Rescan clears the tick');
-    await until('Rescan sends the same code again', async () => (await sent()).slice(sentSoFar.length).includes(sentSoFar.at(-1)), 1500);
-    ok('Rescan sends the code in view again straight away');
+    assert.equal(await rescanButton.isEnabled(), false, 'Rescan has nothing to do until the next scan');
+    await until('the camera runs again', () => controlsPhone.$eval('video', (video) => !video.paused), 3000);
+    await until('Rescan lets the next scan out', async () => (await sent()) > sentWhenFrozen, 30_000);
+    ok('Rescan reopens the camera and the next code goes out');
 
     // A real two-finger pinch, sent as touch input to the browser rather than called in the page.
     const touch = await controlsContext.newCDPSession(controlsPhone);
@@ -540,6 +558,7 @@ async function main() {
     ok('a second laptop joins with the same link');
 
     const phoneTwoContext = await browser.newContext(IPHONE_SIZED);
+    await phoneTwoContext.addInitScript(keepRescanning);
     const phoneTwo = await phoneTwoContext.newPage();
     watchPhone(phoneTwo);
     await phoneTwo.goto(relayUrl);

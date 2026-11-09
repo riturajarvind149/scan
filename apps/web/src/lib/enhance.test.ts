@@ -7,9 +7,10 @@ import QRCode from 'qrcode';
 import { prepareZXingModule } from 'zxing-wasm/reader';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { enhanceVerified, flattenShading, rectify, removeColourCast, sharpen, sharpnessScore, stretchLevels, type RawImage } from './enhance';
-import { decodeIndependently, decodeQrCodes } from './qr-decoder';
+import { decodeIndependently, decodeQrCodes, locateIndependently } from './qr-decoder';
 
 const require = createRequire(import.meta.url);
+const { PNG } = require('pngjs') as { PNG: { sync: { read(file: Buffer): { data: Buffer; width: number; height: number } } } };
 
 class TestImageData {
   constructor(
@@ -349,6 +350,38 @@ describe('a code photographed off a tinted screen', () => {
     const quarter = Math.floor(order.length / 4);
     const average = (part: number[]) => part.reduce((sum, at) => sum + lum(result, at), 0) / part.length;
     expect(average(order.slice(0, quarter))).toBeLessThan(average(order.slice(-quarter)));
+  });
+});
+
+describe('a real scan of a far-away TV, taken on a phone', () => {
+  const REAL_TEXT = 'http://itunes.apple.com/us/app/encyclopaedia-britannica/id447919187?mt=8';
+
+  function realScan(): RawImage {
+    const png = PNG.sync.read(fs.readFileSync(new URL('./fixtures/far-tv-scan.png', import.meta.url)));
+    return { data: new Uint8ClampedArray(png.data), width: png.width, height: png.height };
+  }
+
+  it('is too small for the main decoder alone, which is what used to stop enhancement', async () => {
+    expect(await decodeQrCodes(realScan(), true)).toEqual([]);
+  });
+
+  it('comes out straight and verified once the second decoder helps find it', async () => {
+    const result = await enhanceVerified(realScan(), REAL_TEXT, decodeQrCodes, decodeIndependently, { locate: locateIndependently });
+    expect(result).not.toBeNull();
+    expect(result!.image.width).toBe(result!.image.height);
+    expect((await decodeQrCodes(result!.image)).map((detection) => detection.text)).toEqual([REAL_TEXT]);
+    expect(jsQR(result!.image.data, result!.image.width, result!.image.height)?.data).toBe(REAL_TEXT);
+  });
+
+  it('can also start from the corners the live scan saw', async () => {
+    const corners = locateIndependently(realScan())!.corners;
+    const result = await enhanceVerified(realScan(), REAL_TEXT, decodeQrCodes, decodeIndependently, { corners });
+    expect(result).not.toBeNull();
+  });
+
+  it('still refuses when the result would read differently', async () => {
+    const corners = locateIndependently(realScan())!.corners;
+    expect(await enhanceVerified(realScan(), 'https://evil.example/', decodeQrCodes, decodeIndependently, { corners })).toBeNull();
   });
 });
 

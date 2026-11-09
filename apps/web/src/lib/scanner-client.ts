@@ -1,3 +1,4 @@
+import type { Point } from './capture';
 import type { Detection, EnhancedResult, RawImage } from './enhance';
 
 /** Runs decoding and enhancement off the main thread, so the camera preview never stutters. */
@@ -24,8 +25,9 @@ export class ScannerClient {
     return this.call({ kind: 'detect', image, thorough, stretch }, image);
   }
 
-  enhance(image: RawImage, text: string): Promise<EnhancedResult | null> {
-    return this.call({ kind: 'enhance', image, text }, image);
+  /** `corners` are where the live scan saw the code in this image. */
+  enhance(image: RawImage, text: string, corners: Point[]): Promise<EnhancedResult | null> {
+    return this.call({ kind: 'enhance', image, text, corners }, image);
   }
 
   terminate(): void {

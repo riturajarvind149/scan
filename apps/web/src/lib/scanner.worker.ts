@@ -1,8 +1,9 @@
 /// <reference lib="webworker" />
 import { prepareZXingModule } from 'zxing-wasm/reader';
 import wasmUrl from 'zxing-wasm/reader/zxing_reader.wasm?url';
+import type { Point } from './capture';
 import { enhanceVerified, stretchLevels, type RawImage } from './enhance';
-import { decodeIndependently, decodeQrCodes } from './qr-decoder';
+import { decodeIndependently, decodeQrCodes, locateIndependently } from './qr-decoder';
 
 // Served from this relay rather than the library's default CDN, so same-Wi-Fi mode needs no internet.
 prepareZXingModule({
@@ -13,7 +14,7 @@ prepareZXingModule({
 
 export type ScannerRequest =
   | { id: number; kind: 'detect'; image: RawImage; thorough: boolean; stretch: boolean }
-  | { id: number; kind: 'enhance'; image: RawImage; text: string };
+  | { id: number; kind: 'enhance'; image: RawImage; text: string; corners: Point[] };
 
 const worker = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -24,7 +25,10 @@ worker.onmessage = async ({ data: request }: MessageEvent<ScannerRequest>) => {
       const image = request.stretch ? stretchLevels(request.image) : request.image;
       worker.postMessage({ id: request.id, result: await decodeQrCodes(image, request.thorough) });
     } else {
-      const enhanced = await enhanceVerified(request.image, request.text, decodeQrCodes, decodeIndependently);
+      const enhanced = await enhanceVerified(request.image, request.text, decodeQrCodes, decodeIndependently, {
+        locate: locateIndependently,
+        corners: request.corners,
+      });
       worker.postMessage({ id: request.id, result: enhanced }, enhanced ? [enhanced.image.data.buffer] : []);
     }
   } catch (err) {

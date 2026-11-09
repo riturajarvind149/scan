@@ -121,11 +121,13 @@ function nextPass(index: number, frame: HTMLCanvasElement, zoom: number): { regi
 /**
  * Runs the camera and looks for QR codes while `active` is true. `onDetections` gets every code
  * found, and the full-resolution frame they were found in so a capture matches the detection exactly.
+ * While `paused`, the preview holds still and nothing is looked for, and the camera stays ready.
  */
 export function useQrCamera(
   videoRef: RefObject<HTMLVideoElement>,
   active: boolean,
   onDetections: (detections: Detection[], frame: HTMLCanvasElement) => void,
+  paused = false,
 ): CameraState {
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -138,6 +140,8 @@ export function useQrCamera(
 
   const callback = useRef(onDetections);
   callback.current = onDetections;
+  const pausedRef = useRef(paused);
+  pausedRef.current = paused;
   const trackRef = useRef<MediaStreamTrack | null>(null);
   const zoomRef = useRef({ value: 1, hardware: false });
   const brightnessRef = useRef({ value: 0, userSet: false, min: 0, step: 0, lastAuto: 0, available: false });
@@ -202,7 +206,7 @@ export function useQrCamera(
       } catch {
         // Not supported, or battery saver is on.
       }
-      void video.play().catch(() => undefined);
+      if (!pausedRef.current) void video.play().catch(() => undefined);
     };
     document.addEventListener('visibilitychange', keepAwake);
 
@@ -253,7 +257,7 @@ export function useQrCamera(
 
       while (!disposed) {
         const tickStart = Date.now();
-        if (document.hidden || !video.videoWidth) {
+        if (document.hidden || !video.videoWidth || pausedRef.current) {
           await new Promise((resolve) => setTimeout(resolve, 250));
           continue;
         }
@@ -308,7 +312,7 @@ export function useQrCamera(
           : Promise.resolve();
         await Promise.all([fromWorker, fromPhone]);
         if (disposed) return;
-        if (found.size === 0) setDetections([]);
+        if (found.size === 0 && !pausedRef.current) setDetections([]);
 
         const elapsed = Date.now() - tickStart;
         if (elapsed < MIN_TICK_MS) await new Promise((resolve) => setTimeout(resolve, MIN_TICK_MS - elapsed));
@@ -335,6 +339,17 @@ export function useQrCamera(
       zoomRef.current = { value: 1, hardware: false };
     };
   }, [active, videoRef, applyBrightness]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video?.srcObject) return;
+    if (paused) {
+      video.pause();
+    } else {
+      setDetections([]);
+      void video.play().catch(() => undefined);
+    }
+  }, [paused, videoRef]);
 
   return {
     error,
