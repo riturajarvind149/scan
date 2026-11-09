@@ -86,6 +86,15 @@ describe('PhoneClient', () => {
     client.stop();
   });
 
+  it('connects without a credential on a public link', () => {
+    const client = new PhoneClient('wss://relay.test/ws', null);
+    client.start();
+    const socket = latestSocket();
+    socket.onopen?.();
+    expect(socket.sent[0]).toEqual({ type: 'auth' });
+    client.stop();
+  });
+
   it('holds a scan while the laptop is offline and sends it when it returns', () => {
     const { client, socket } = connectedClient();
     socket.receive({ type: 'connection-status', desktopOnline: false });

@@ -79,6 +79,7 @@ let exitCode = 1;
 try {
   const page = await app.firstWindow();
   await page.waitForFunction(() => document.getElementById('localStatus').textContent.includes('ready'));
+  await page.click('#tabLocal');
   await page.click('#showPairing');
   await page.waitForSelector('#pairing:not([hidden])');
   const code = await page.textContent('#pairingCode');

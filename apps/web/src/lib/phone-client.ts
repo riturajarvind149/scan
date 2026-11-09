@@ -54,7 +54,8 @@ export class PhoneClient {
 
   constructor(
     private readonly url: string,
-    private readonly token: string,
+    /** Null on a relay with a public phone link, which needs no credential. */
+    private readonly token: string | null,
   ) {}
 
   subscribe = (listener: () => void): (() => void) => {
@@ -115,7 +116,7 @@ export class PhoneClient {
     this.ws = ws;
 
     ws.onopen = () => {
-      if (ws === this.ws) this.sendRaw({ type: 'auth', token: this.token });
+      if (ws === this.ws) this.sendRaw(this.token ? { type: 'auth', token: this.token } : { type: 'auth' });
     };
     ws.onmessage = (event) => {
       if (ws !== this.ws) return;

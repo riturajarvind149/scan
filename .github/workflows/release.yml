@@ -1,0 +1,25 @@
+name: Release
+
+# Pushing a tag such as v1.1.0 publishes the Windows installer, which the invite page links to.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run package:desktop
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" apps/desktop/release/QR-to-Windows-11-Setup.exe --generate-notes

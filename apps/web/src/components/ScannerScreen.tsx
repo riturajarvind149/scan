@@ -9,10 +9,11 @@ import { PhoneClient, type ClientState, type ScanEntry } from '../lib/phone-clie
 const SAME_CODE_COOLDOWN_MS = 3000;
 
 interface ScannerScreenProps {
-  pairing: Pairing;
+  /** Null when the relay's link is public, so there is nothing to pair or unpair. */
+  pairing: Pairing | null;
   notice: string | null;
-  onUnpair: () => void;
-  onRevoked: () => void;
+  onUnpair?: () => void;
+  onRevoked?: () => void;
 }
 
 function newScanId(): string {
@@ -40,7 +41,7 @@ function scanLabel(scan: ScanEntry): string {
 }
 
 export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerScreenProps) {
-  const client = useMemo(() => new PhoneClient(WS_URL, pairing.token), [pairing.token]);
+  const client = useMemo(() => new PhoneClient(WS_URL, pairing?.token ?? null), [pairing?.token]);
   const state = useSyncExternalStore(client.subscribe, client.getSnapshot);
   const [cameraOn, setCameraOn] = useState(true);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -52,7 +53,7 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
   }, [client]);
 
   useEffect(() => {
-    if (state.revoked) onRevoked();
+    if (state.revoked) onRevoked?.();
   }, [state.revoked, onRevoked]);
 
   const onResult = useCallback(
@@ -89,9 +90,11 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
         <span className={`pill ${connection.tone}`} role="status">
           {connection.text}
         </span>
-        <button type="button" className="link" onClick={onUnpair}>
-          Unpair
-        </button>
+        {onUnpair ? (
+          <button type="button" className="link" onClick={onUnpair}>
+            Unpair
+          </button>
+        ) : null}
       </header>
 
       <div className="viewfinder">

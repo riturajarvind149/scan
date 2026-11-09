@@ -1,9 +1,11 @@
+import crypto from 'node:crypto';
 import type http from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   AUTH_TIMEOUT_MS,
-  MAX_REVOKE_BATCH,
   MAX_WS_MESSAGE_BYTES,
+  OPEN_CONNECTIONS_PER_IP,
+  OPEN_SCANS_PER_MINUTE,
   RATE_LIMIT_SCANS_PER_MINUTE,
   WS_CLOSE_AUTH_TIMEOUT,
   WS_CLOSE_UNAUTHORIZED,
@@ -11,6 +13,7 @@ import {
   validateQrPayload,
   type ClientMessage,
   type ErrorCode,
+  type LaptopSummary,
   type PhoneSummary,
   type QrImagePayload,
   type ServerMessage,
@@ -18,12 +21,17 @@ import {
 import { RateLimiter } from './rate-limit.js';
 import type { Identity, PairingStore, PhoneRecord } from './store.js';
 
+/** Close code for "try again later": a phone keeps retrying rather than treating it as being unpaired. */
+const WS_CLOSE_TRY_LATER = 1013;
+
 const SCAN_MEMORY_MS = 5 * 60 * 1000;
 const AUTH_FAILURES_PER_MINUTE = 20;
 
 /** A connected desktop or phone: a WebSocket, or the in-process desktop of a local relay. */
 interface Peer {
   identity: Identity;
+  /** Whose allowance a scan spends. Anonymous phones can reconnect at will, so theirs is per IP. */
+  rateKey?: string;
   send(message: ServerMessage): void;
   close(code: number, reason: string): void;
 }
@@ -37,12 +45,16 @@ export class Hub {
   private scans = new Map<string, { at: number; acked: boolean; phoneId: string }>();
   private scanLimiter = new RateLimiter(RATE_LIMIT_SCANS_PER_MINUTE, 60_000);
   private authLimiter = new RateLimiter(AUTH_FAILURES_PER_MINUTE, 60_000);
+  private openLimiter = new RateLimiter(OPEN_SCANS_PER_MINUTE, 60_000);
+  private openConnections = new Map<string, number>();
   private wss: WebSocketServer | null = null;
   private heartbeat: ReturnType<typeof setInterval>;
 
   constructor(
     private readonly store: PairingStore,
     private readonly clientIp: (req: http.IncomingMessage) => string = (req) => req.socket.remoteAddress ?? 'unknown',
+    /** The account that phones without a credential send to. Set only when the phone link is public. */
+    private readonly openAccountId?: string,
   ) {
     this.heartbeat = setInterval(() => this.tick(), WS_HEARTBEAT_INTERVAL_MS);
     this.heartbeat.unref?.();
@@ -85,9 +97,31 @@ export class Hub {
     this.broadcastStatus(phone.desktopId);
   }
 
-  /** Tells a desktop's laptops that another one joined, so an unexpected laptop gets noticed. */
-  notifyLaptopJoined(desktopId: string): void {
-    for (const peer of this.desktopPeers(desktopId)) peer.send({ type: 'laptop-joined' });
+  /** Tells the laptops that another one joined, so an unexpected laptop gets noticed. */
+  notifyLaptopJoined(desktopId: string, name: string): void {
+    for (const peer of this.desktopPeers(desktopId)) peer.send({ type: 'laptop-joined', name });
+  }
+
+  /** Removes a laptop: its credential stops working and any live connection is dropped. */
+  revokeLaptop(laptopId: string): void {
+    this.store.revokeLaptop(laptopId);
+    for (const peer of [...this.peers]) {
+      if (peer.identity.role === 'desktop' && peer.identity.laptopId === laptopId) {
+        peer.close(WS_CLOSE_UNAUTHORIZED, 'Laptop removed');
+      }
+    }
+  }
+
+  listLaptops(): LaptopSummary[] {
+    const online = new Set<string>();
+    for (const peer of this.peers) {
+      if (peer.identity.role === 'desktop' && peer.identity.laptopId) online.add(peer.identity.laptopId);
+    }
+    return this.store.listLaptops().map((laptop) => ({ ...laptop, online: online.has(laptop.id) }));
+  }
+
+  phonesOnline(): number {
+    return [...this.peers].filter((peer) => peer.identity.role === 'phone').length;
   }
 
   /** Revokes a phone: its credential stops working and any live connection is dropped. */
@@ -145,7 +179,10 @@ export class Hub {
       if (peer) {
         this.handleMessage(peer, message);
       } else if (message.type === 'auth') {
-        if (this.authenticateSocket(ws, message.token, ip)) clearTimeout(authTimer);
+        const authenticated = message.token === undefined && this.openAccountId
+          ? this.admitAnonymousPhone(ws, this.openAccountId, ip)
+          : this.authenticateSocket(ws, message.token, ip);
+        if (authenticated) clearTimeout(authTimer);
       } else if (message.type === 'ping') {
         this.sendRaw(ws, { type: 'pong' });
       } else {
@@ -166,15 +203,38 @@ export class Hub {
     ws.on('error', () => undefined);
   }
 
-  private authenticateSocket(ws: WebSocket, token: string, ip: string): boolean {
+  /** A phone on a public link: no credential, so each connection is its own short-lived identity. */
+  private admitAnonymousPhone(ws: WebSocket, accountId: string, ip: string): boolean {
+    const connections = this.openConnections.get(ip) ?? 0;
+    if (connections >= OPEN_CONNECTIONS_PER_IP) {
+      ws.close(WS_CLOSE_TRY_LATER, 'Too many connections');
+      return false;
+    }
+    this.openConnections.set(ip, connections + 1);
+    ws.once('close', () => {
+      const remaining = (this.openConnections.get(ip) ?? 1) - 1;
+      if (remaining > 0) this.openConnections.set(ip, remaining);
+      else this.openConnections.delete(ip);
+    });
+    this.addSocketPeer(ws, { role: 'phone', desktopId: accountId, phoneId: `open-${crypto.randomUUID()}` }, `ip:${ip}`);
+    return true;
+  }
+
+  private authenticateSocket(ws: WebSocket, token: string | undefined, ip: string): boolean {
     const identity = this.authLimiter.allow(ip) ? this.store.authenticate(token) : null;
     if (!identity) {
       this.sendRaw(ws, { type: 'auth-result', success: false, error: 'Invalid or revoked credential' });
       ws.close(WS_CLOSE_UNAUTHORIZED, 'Invalid token');
       return false;
     }
+    this.addSocketPeer(ws, identity);
+    return true;
+  }
+
+  private addSocketPeer(ws: WebSocket, identity: Identity, rateKey?: string): void {
     const peer: Peer = {
       identity,
+      rateKey,
       send: (message) => this.sendRaw(ws, message),
       close: (code, reason) => ws.close(code, reason),
     };
@@ -182,7 +242,6 @@ export class Hub {
     this.peers.add(peer);
     this.sendRaw(ws, { type: 'auth-result', success: true, role: identity.role });
     this.broadcastStatus(identity.desktopId);
-    return true;
   }
 
   private handleMessage(peer: Peer, message: ClientMessage): void {
@@ -195,9 +254,6 @@ export class Hub {
         return;
       case 'qr-ack':
         this.handleAck(peer, message.scanId);
-        return;
-      case 'revoke-phones':
-        this.handleRevocations(peer, message.phoneIds);
         return;
       default:
         this.sendError(peer, 'Unknown message type', 'UNKNOWN_TYPE');
@@ -216,6 +272,11 @@ export class Hub {
       return;
     }
 
+    if (peer.rateKey && this.store.scansPaused) {
+      this.sendError(peer, 'Scanning is paused by the administrator.', 'SCANS_PAUSED', scan.scanId);
+      return;
+    }
+
     const key = `${identity.desktopId}:${scan.scanId}`;
     const known = this.scans.get(key);
     if (known?.acked) {
@@ -223,7 +284,7 @@ export class Hub {
       return;
     }
     // Retries of a scan already counted do not spend the sender's allowance.
-    if (!known && !this.scanLimiter.allow(identity.phoneId)) {
+    if (!known && (!this.scanLimiter.allow(peer.rateKey ?? identity.phoneId) || (peer.rateKey && !this.openLimiter.allow('all')))) {
       this.sendError(peer, 'Too many scans; slow down', 'RATE_LIMIT', scan.scanId);
       return;
     }
@@ -234,15 +295,9 @@ export class Hub {
       return;
     }
     this.pruneScans();
-    this.scans.set(key, { at: Date.now(), acked: false, phoneId: identity.phoneId });
+    // On a retry the phone may have reconnected under a new id, and the ack must reach it there.
+    this.scans.set(key, { at: known?.at ?? Date.now(), acked: false, phoneId: identity.phoneId });
     for (const desktop of desktops) desktop.send(scan);
-  }
-
-  private handleRevocations(peer: Peer, phoneIds: unknown): void {
-    if (peer.identity.role !== 'desktop' || !Array.isArray(phoneIds)) return;
-    for (const phoneId of phoneIds.slice(0, MAX_REVOKE_BATCH)) {
-      if (typeof phoneId === 'string') this.revokePhone(peer.identity.desktopId, phoneId);
-    }
   }
 
   private handleAck(peer: Peer, scanId: unknown): void {

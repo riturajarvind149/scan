@@ -3,6 +3,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRelay, PairingStore } from '@qr2win/relay-core';
+import { upstashStorage } from './upstash.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -24,8 +25,45 @@ if (!RELAY_SECRET) {
   console.warn(`[server] RELAY_SECRET is not set; using one kept in ${DATA_DIR}. If that folder is lost, every device must pair again.`);
 }
 
-const store = new PairingStore(path.join(DATA_DIR, 'pairings.json'), RELAY_SECRET);
-const { app, hub } = createRelay({ store, webRoot: WEB_ROOT, corsOrigins: CORS_ORIGINS, trustProxy: TRUST_PROXY });
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const DOWNLOAD_URL = process.env.DESKTOP_DOWNLOAD_URL ?? 'https://github.com/riturajarvind149/scan/releases/latest/download/QR-to-Windows-11-Setup.exe';
+const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+
+if (ADMIN_PASSWORD && ADMIN_PASSWORD.length < 8) {
+  console.error('[server] ADMIN_PASSWORD must be at least 8 characters.');
+  process.exit(1);
+}
+if (!ADMIN_PASSWORD) console.warn('[server] ADMIN_PASSWORD is not set, so the admin dashboard is off.');
+if (UPSTASH_URL && !RELAY_SECRET) {
+  console.error('[server] Set RELAY_SECRET when using Upstash; the generated secret is only kept on local disk.');
+  process.exit(1);
+}
+if (!UPSTASH_URL) {
+  console.warn('[server] No UPSTASH_REDIS_REST_URL: laptops and removals are only saved on this disk, which free hosting wipes.');
+}
+
+const store = new PairingStore(path.join(DATA_DIR, 'pairings.json'), RELAY_SECRET, {
+  sharedAccount: true,
+  remote: UPSTASH_URL && UPSTASH_TOKEN ? upstashStorage(UPSTASH_URL, UPSTASH_TOKEN) : undefined,
+});
+
+// Before accepting anyone: a laptop that was removed must not get in during the first moments.
+try {
+  await store.restore();
+} catch (err) {
+  console.error('[server] Could not read from Upstash; starting with what is on disk:', (err as Error).message);
+}
+
+const { app, hub } = createRelay({
+  store,
+  webRoot: WEB_ROOT,
+  corsOrigins: CORS_ORIGINS,
+  trustProxy: TRUST_PROXY,
+  mode: 'open',
+  adminPassword: ADMIN_PASSWORD,
+  downloadUrl: DOWNLOAD_URL,
+});
 const server = http.createServer(app);
 hub.attach(server);
 
@@ -43,8 +81,9 @@ function shutdown(signal: string): void {
   console.log(`[server] ${signal} received, shutting down`);
   const forced = setTimeout(() => process.exit(1), 10_000);
   forced.unref();
-  store.flush();
-  void hub.close().then(() => server.close(() => process.exit(0)));
+  void store.flush()
+    .then(() => hub.close())
+    .then(() => server.close(() => process.exit(0)));
 }
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));

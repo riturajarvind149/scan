@@ -4,9 +4,6 @@ import {
   WS_CLOSE_UNAUTHORIZED,
   WS_HEARTBEAT_INTERVAL_MS,
   WS_PONG_TIMEOUT_MS,
-  buildPairingUrl,
-  type PairingCode,
-  type PhoneSummary,
   type RegisterDesktopResponse,
   type ServerMessage,
 } from '@qr2win/shared-types';
@@ -16,21 +13,20 @@ import type { SettingsStore } from './settings';
 const REQUEST_TIMEOUT_MS = 15_000;
 const MAX_BACKOFF_MS = 30_000;
 
-export type ChannelStatus = 'off' | 'connecting' | 'connected' | 'error';
+/** 'needs-invite': the relay is set, but this laptop isn't on it yet, or was removed. */
+export type ChannelStatus = 'off' | 'connecting' | 'connected' | 'error' | 'needs-invite';
 
 export interface InternetState {
   status: ChannelStatus;
   error: string | null;
   serverUrl: string;
-  phones: PhoneSummary[];
 }
 
-/** Keeps the desktop registered with and connected to the internet relay. */
+/** Keeps the desktop connected to the internet relay, once it has joined with an invite link. */
 export class InternetChannel {
   private ws: WebSocket | null = null;
   private status: ChannelStatus = 'off';
   private error: string | null = null;
-  private phones: PhoneSummary[] = [];
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
@@ -44,10 +40,10 @@ export class InternetChannel {
   ) {}
 
   getState(): InternetState {
-    return { status: this.status, error: this.error, serverUrl: this.settings.serverUrl, phones: this.phones };
+    return { status: this.status, error: this.error, serverUrl: this.settings.serverUrl };
   }
 
-  /** Connects using the saved settings, registering with the relay first if needed. */
+  /** Connects using the saved settings. */
   start(): void {
     this.stop();
     if (!this.settings.serverUrl) {
@@ -68,7 +64,6 @@ export class InternetChannel {
       this.ws.terminate();
       this.ws = null;
     }
-    this.phones = [];
     this.attempts = 0;
     this.setStatus('off');
   }
@@ -79,45 +74,23 @@ export class InternetChannel {
     else this.ws?.ping();
   }
 
-  async createPairing(): Promise<{ code: string; expiresAt: number; url: string }> {
-    if (!this.settings.serverUrl) throw new Error('Set your relay address first.');
-    const credential = await this.ensureCredential();
-    const pairing = await this.request<PairingCode>('/api/pairing/generate', { method: 'POST', token: credential.token });
-    return { ...pairing, url: buildPairingUrl(this.settings.serverUrl, pairing.code) };
-  }
-
-  /** A code that lets another laptop join this account, so scans reach both. */
-  async createLaptopCode(): Promise<PairingCode> {
-    if (!this.settings.serverUrl) throw new Error('Set your relay address first.');
-    const credential = await this.ensureCredential();
-    return this.request<PairingCode>('/api/pairing/generate', { method: 'POST', token: credential.token, body: { kind: 'laptop' } });
-  }
-
-  /** Joins this laptop to the account of the laptop that showed the code. */
-  async joinAccount(code: string): Promise<void> {
-    if (!this.settings.serverUrl) throw new Error('Set your relay address first.');
-    const joined = await this.request<RegisterDesktopResponse>('/api/desktops/join', { method: 'POST', body: { code } });
+  /** Joins the relay an invite link belongs to. Nothing changes here unless the relay accepts it. */
+  async joinWithInvite(origin: string, invite: string, laptopName: string): Promise<void> {
+    const joined = await this.request<RegisterDesktopResponse>(origin, '/api/desktops/join', { method: 'POST', body: { invite, name: laptopName } });
+    this.settings.serverUrl = origin;
     this.settings.setCredential({ desktopId: joined.desktopId, token: joined.token });
     this.start();
   }
 
-  async unpair(phoneId: string): Promise<void> {
-    const credential = this.settings.getCredential();
-    if (!credential) throw new Error('Not registered with the relay.');
-    await this.request(`/api/phones/${encodeURIComponent(phoneId)}`, { method: 'DELETE', token: credential.token });
-    this.settings.addRemovedPhone(phoneId);
-  }
-
   private async connect(generation: number): Promise<void> {
     this.setStatus('connecting');
-    let token: string;
-    try {
-      ({ token } = await this.ensureCredential());
-    } catch (err) {
-      if (generation === this.generation) this.scheduleRetry(generation, (err as Error).message);
+    const credential = this.settings.getCredential();
+    if (!credential) {
+      this.error = null;
+      this.setStatus('needs-invite');
       return;
     }
-    if (generation !== this.generation) return;
+    const { token } = credential;
 
     const wsUrl = `${this.settings.serverUrl.replace(/^http/, 'ws')}/ws`;
     const ws = new WebSocket(wsUrl, { maxPayload: MAX_WS_MESSAGE_BYTES, handshakeTimeout: REQUEST_TIMEOUT_MS });
@@ -133,10 +106,6 @@ export class InternetChannel {
       }
       if (message.type === 'auth-result') {
         if (message.success) {
-          // Sent first: a relay that restarted on an empty disk has forgotten these phones.
-          if (this.settings.removedPhones.length > 0) {
-            ws.send(JSON.stringify({ type: 'revoke-phones', phoneIds: this.settings.removedPhones }));
-          }
           this.attempts = 0;
           this.error = null;
           this.setStatus('connected');
@@ -151,9 +120,7 @@ export class InternetChannel {
         (reply) => {
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(reply));
         },
-        (phones) => {
-          this.phones = phones;
-        },
+        () => undefined,
       );
     });
     ws.on('pong', () => {
@@ -168,33 +135,22 @@ export class InternetChannel {
       this.clearTimers();
       this.ws = null;
       if (code === WS_CLOSE_UNAUTHORIZED) {
-        // The relay no longer recognises this PC, for example its data was reset.
-        // Phones paired through it are gone too, so they will be listed as such and need re-pairing.
+        // Removed from the dashboard, or the relay's secret changed. Only a new invite can fix this.
         this.settings.setCredential(null);
-        this.phones = [];
+        this.error = 'This laptop was removed from the relay. Ask for a new invite link to rejoin.';
+        this.setStatus('needs-invite');
+        return;
       }
       this.scheduleRetry(generation, this.error ?? 'Connection lost');
     });
   }
 
-  private async ensureCredential() {
-    const existing = this.settings.getCredential();
-    if (existing) return existing;
-    const created = await this.request<RegisterDesktopResponse>('/api/desktops/register', { method: 'POST' });
-    const credential = { desktopId: created.desktopId, token: created.token };
-    this.settings.setCredential(credential);
-    return credential;
-  }
-
-  private async request<T = unknown>(pathname: string, options: { method: string; token?: string; body?: unknown }): Promise<T> {
+  private async request<T = unknown>(origin: string, pathname: string, options: { method: string; body?: unknown }): Promise<T> {
     let response: Response;
     try {
-      response = await fetch(`${this.settings.serverUrl}${pathname}`, {
+      response = await fetch(`${origin}${pathname}`, {
         method: options.method,
-        headers: {
-          'Content-Type': 'application/json',
-          ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: options.method === 'POST' ? JSON.stringify(options.body ?? {}) : undefined,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
@@ -206,7 +162,6 @@ export class InternetChannel {
     }
     if (!response.ok) {
       const body = (await response.json().catch(() => null)) as { error?: string } | null;
-      if (response.status === 401) this.settings.setCredential(null);
       throw new Error(body?.error ?? `The relay answered with an error (${response.status}).`);
     }
     return (await response.json()) as T;

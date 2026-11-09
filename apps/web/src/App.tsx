@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { parsePairingHash } from '@qr2win/shared-types';
+import { parsePairingHash, type RelayConfig } from '@qr2win/shared-types';
+import { AdminPage } from './components/AdminPage';
+import { JoinPage } from './components/JoinPage';
 import { PairingScreen } from './components/PairingScreen';
 import { ScannerScreen } from './components/ScannerScreen';
 import {
   clearPairing,
+  fetchConfig,
   loadPairing,
   requestPairing,
   requestUnpair,
@@ -13,6 +16,45 @@ import {
 } from './lib/pairing';
 
 export default function App() {
+  const [config, setConfig] = useState<RelayConfig | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      fetchConfig()
+        .then((loaded) => {
+          if (!cancelled) setConfig(loaded);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setFailed(true);
+          setTimeout(load, 3000); // a sleeping free server can take a minute to wake
+        });
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!config) {
+    return (
+      <main className="page">
+        <p className="muted" role="status">{failed ? 'Waking up the server. This can take a minute…' : 'Loading…'}</p>
+      </main>
+    );
+  }
+
+  const { pathname } = window.location;
+  if (pathname.startsWith('/admin')) return <AdminPage config={config} />;
+  if (pathname.startsWith('/join/')) return <JoinPage config={config} token={pathname.slice('/join/'.length).replace(/\/$/, '')} />;
+  if (config.mode === 'open') return <ScannerScreen pairing={null} notice={null} />;
+  return <PairedApp />;
+}
+
+/** A laptop's own Wi-Fi relay, where a phone pairs once with a code. */
+function PairedApp() {
   const [pairing, setPairing] = useState<Pairing | null>(loadPairing);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

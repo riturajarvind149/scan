@@ -128,14 +128,12 @@ describe('relay', () => {
   }
 
   async function registerDesktop(): Promise<{ desktopId: string; token: string }> {
-    const res = await post('/api/desktops/register');
-    expect(res.status).toBe(201);
-    return (await res.json()) as { desktopId: string; token: string };
+    return store.registerDesktop();
   }
 
   async function pairPhone(desktopToken: string): Promise<{ token: string; phoneId: string }> {
-    const generated = await post('/api/pairing/generate', {}, desktopToken);
-    const { code } = (await generated.json()) as { code: string };
+    const identity = store.authenticate(desktopToken);
+    const { code } = store.issueCode(identity!.desktopId);
     const res = await post('/api/pairing/pair', { code, deviceName: 'Test phone' });
     expect(res.status).toBe(200);
     return (await res.json()) as { token: string; phoneId: string };
@@ -157,7 +155,7 @@ describe('relay', () => {
     return client;
   }
 
-  /** The complete real flow: desktop registers, phone pairs with a code, both connect. */
+  /** The Wi-Fi flow: the desktop issues a code, the phone pairs with it, and both connect. */
   async function pairedClients() {
     const desktop = await registerDesktop();
     const phone = await pairPhone(desktop.token);
@@ -202,16 +200,9 @@ describe('relay', () => {
       expect(await impostor.silentFor(200, 'qr-image')).toBe(true);
     });
 
-    it('requires a desktop credential to generate a pairing code', async () => {
-      expect((await post('/api/pairing/generate')).status).toBe(401);
-      const desktop = await registerDesktop();
-      const { token: phoneToken } = await pairPhone(desktop.token);
-      expect((await post('/api/pairing/generate', {}, phoneToken)).status).toBe(401);
-    });
-
     it('rejects wrong and reused codes', async () => {
       const desktop = await registerDesktop();
-      const { code } = (await (await post('/api/pairing/generate', {}, desktop.token)).json()) as { code: string };
+      const { code } = store.issueCode(desktop.desktopId);
       const wrong = code === '000000' ? '000001' : '000000';
       expect((await post('/api/pairing/pair', { code: wrong })).status).toBe(400);
       expect((await post('/api/pairing/pair', { code })).status).toBe(200);
@@ -256,72 +247,10 @@ describe('relay', () => {
     });
   });
 
-  describe('several laptops', () => {
-    async function joinLaptop(desktopToken: string): Promise<{ token: string; desktopId: string }> {
-      const generated = await post('/api/pairing/generate', { kind: 'laptop' }, desktopToken);
-      const { code } = (await generated.json()) as { code: string };
-      expect(code).toMatch(/^\d{8}$/);
-      const res = await post('/api/desktops/join', { code });
-      expect(res.status).toBe(200);
-      return (await res.json()) as { token: string; desktopId: string };
-    }
-
-    it('delivers each scan to every laptop on the account', async () => {
-      const { desktop, phone, desktopToken } = await pairedClients();
-      const second = await joinLaptop(desktopToken);
-      const secondClient = await connect(second.token);
-
-      const payload = scan();
-      phone.send(payload);
-      expect((await desktop.nextOfType('qr-image')).scanId).toBe(payload.scanId);
-      expect((await secondClient.nextOfType('qr-image')).scanId).toBe(payload.scanId);
-    });
-
-    it('tells existing laptops when one joins', async () => {
-      const { desktop, desktopToken } = await pairedClients();
-      await joinLaptop(desktopToken);
-      await desktop.nextOfType('laptop-joined');
-    });
-
-    it('keeps phones and laptops from using each other\'s codes', async () => {
-      const desktop = await registerDesktop();
-      const phoneCode = ((await (await post('/api/pairing/generate', {}, desktop.token)).json()) as { code: string }).code;
-      expect((await post('/api/desktops/join', { code: phoneCode })).status).toBe(400);
-      expect((await post('/api/pairing/pair', { code: phoneCode })).status).toBe(200); // not consumed
-
-      const laptopCode = ((await (await post('/api/pairing/generate', { kind: 'laptop' }, desktop.token)).json()) as { code: string }).code;
-      expect((await post('/api/pairing/pair', { code: laptopCode })).status).toBe(400);
-      expect(store.redeemCode(laptopCode, 'Phone')).toBeNull();
-    });
-
-    it('requires a desktop credential to issue a laptop code', async () => {
-      expect((await post('/api/pairing/generate', { kind: 'laptop' })).status).toBe(401);
-    });
-
-    it('refuses to let laptops join a local relay', async () => {
-      const localRelay = createRelay({ store: new PairingStore(), allowDesktopRegistration: false });
-      const localServer = http.createServer(localRelay.app);
-      await new Promise<void>((resolve) => localServer.listen(0, '127.0.0.1', resolve));
-      const { port } = localServer.address() as AddressInfo;
-      const res = await fetch(`http://127.0.0.1:${port}/api/desktops/join`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: '12345678' }),
-      });
-      expect(res.status).toBe(404);
-      await localRelay.hub.close();
-      await new Promise<void>((resolve) => localServer.close(() => resolve()));
-    });
-  });
-
   describe('revocation', () => {
     it('drops the live connection and refuses the credential afterwards', async () => {
       const { phone, phoneToken, phoneId, desktopToken } = await pairedClients();
-      const res = await fetch(`http://${base}/api/phones/${phoneId}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${desktopToken}` },
-      });
-      expect(res.status).toBe(200);
+      relay.hub.revokePhone(store.authenticate(desktopToken)!.desktopId, phoneId);
       expect(await phone.closed).toBe(WS_CLOSE_UNAUTHORIZED);
 
       const retry = await connect();
@@ -336,15 +265,6 @@ describe('relay', () => {
       expect(await phone.closed).toBe(WS_CLOSE_UNAUTHORIZED);
     });
 
-    it("does not let a desktop revoke another desktop's phone", async () => {
-      const { phoneId } = await pairedClients();
-      const stranger = await registerDesktop();
-      const res = await fetch(`http://${base}/api/phones/${phoneId}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${stranger.token}` },
-      });
-      expect(res.status).toBe(404);
-    });
   });
 
   describe('scan delivery', () => {
@@ -522,39 +442,6 @@ describe('relay', () => {
       expect(issuer.authenticate('not-a-token')).toBeNull();
     });
 
-    it('keeps a removed phone out after a restart once its laptop reconnects', async () => {
-      const secret = 'a'.repeat(32);
-      await stop();
-      await start(undefined, secret);
-      const desktop = await registerDesktop();
-      const phone = await pairPhone(desktop.token);
-
-      await stop();
-      await start(undefined, secret);
-
-      const desktopClient = await connect(desktop.token);
-      desktopClient.send({ type: 'revoke-phones', phoneIds: [phone.phoneId] });
-      await desktopClient.nextOfType('connection-status');
-
-      const retry = await connect();
-      retry.send({ type: 'auth', token: phone.token });
-      expect((await retry.nextOfType('auth-result')).success).toBe(false);
-    });
-
-    it('ignores revoke-phones from a phone, and limits it to the sending account', async () => {
-      const first = await pairedClients();
-      first.phone.send({ type: 'revoke-phones', phoneIds: [first.phoneId] });
-      first.phone.send({ type: 'ping' });
-      await first.phone.nextOfType('pong');
-      expect(store.authenticate(first.phoneToken)).not.toBeNull();
-
-      const stranger = await pairedClients();
-      stranger.desktop.send({ type: 'revoke-phones', phoneIds: [first.phoneId] });
-      stranger.desktop.send({ type: 'ping' });
-      await stranger.desktop.nextOfType('pong');
-      expect(store.authenticate(first.phoneToken)).not.toBeNull();
-    });
-
     it('keeps pairings across a restart and never stores raw tokens', async () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qr2win-'));
       const dataFile = path.join(dir, 'nested', 'pairings.json');
@@ -563,7 +450,7 @@ describe('relay', () => {
 
       const desktop = await registerDesktop();
       const phone = await pairPhone(desktop.token);
-      store.flush();
+      await store.flush();
 
       const onDisk = fs.readFileSync(dataFile, 'utf-8');
       expect(onDisk).not.toContain(desktop.token);
@@ -627,6 +514,14 @@ describe('relay', () => {
       expect(res.headers.get('x-powered-by')).toBeNull();
     });
 
+    it('has none of the open-relay routes on a laptop\'s Wi-Fi relay', async () => {
+      for (const pathname of ['/api/desktops/join', '/api/admin/login']) {
+        expect((await post(pathname)).status).toBe(404);
+      }
+      const config = (await (await fetch(`http://${base}/api/config`)).json()) as { mode: string; adminEnabled: boolean };
+      expect(config).toMatchObject({ mode: 'paired', adminEnabled: false });
+    });
+
     it('answers bad JSON with a 400 rather than a stack trace', async () => {
       const res = await fetch(`http://${base}/api/pairing/pair`, {
         method: 'POST',
@@ -637,15 +532,5 @@ describe('relay', () => {
       expect(await res.text()).not.toContain('SyntaxError');
     });
 
-    it('can refuse desktop registration on a local relay', async () => {
-      const localRelay = createRelay({ store: new PairingStore(), allowDesktopRegistration: false });
-      const localServer = http.createServer(localRelay.app);
-      await new Promise<void>((resolve) => localServer.listen(0, '127.0.0.1', resolve));
-      const { port } = localServer.address() as AddressInfo;
-      const res = await fetch(`http://127.0.0.1:${port}/api/desktops/register`, { method: 'POST' });
-      expect(res.status).toBe(404);
-      await localRelay.hub.close();
-      await new Promise<void>((resolve) => localServer.close(() => resolve()));
-    });
   });
 });
