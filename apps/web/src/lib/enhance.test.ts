@@ -1,4 +1,5 @@
 // @vitest-environment node
+/// <reference types="node" />
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import jsQR from 'jsqr';
