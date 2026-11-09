@@ -181,9 +181,10 @@ export class LocalChannel {
     this.desktopId = store.ensureLocalDesktop();
     const { app: expressApp, hub } = createRelay({ store, webRoot: webRoot(), allowDesktopRegistration: false });
     const server = https.createServer({ key: certificate.key, cert: certificate.cert }, expressApp);
-    hub.attach(server);
 
+    // Attach only once bound: the WebSocket server rethrows the listen errors that bind() retries on.
     this.port = await this.bind(server);
+    hub.attach(server);
     this.server = server;
     this.store = store;
     this.hub = hub;

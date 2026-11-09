@@ -53,6 +53,14 @@ export function normalizeServerUrl(input: string): string {
   return url.origin;
 }
 
+/** The address early versions saved automatically, whether or not the user ever chose it. */
+const LEGACY_DEFAULT_RELAY = 'http://localhost:3001';
+
+/** The relay to use on startup: a saved leftover default gives way to the one built into this app. */
+export function resolveServerUrl(saved: string, builtInDefault: string): string {
+  return saved === LEGACY_DEFAULT_RELAY && builtInDefault ? builtInDefault : saved;
+}
+
 /** True when a phone elsewhere on the network could not reach this address. */
 export function isLoopbackUrl(serverUrl: string): boolean {
   const host = new URL(serverUrl).hostname.replace(/^\[|\]$/g, '');

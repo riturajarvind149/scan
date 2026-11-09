@@ -98,6 +98,12 @@ function decodeDataUrl(dataUrl) {
 }
 
 async function launchDesktop(userData) {
+  // Start with no relay so a fresh test profile doesn't use the one built into the app.
+  const settingsFile = path.join(userData, 'settings.json');
+  if (!fs.existsSync(settingsFile)) {
+    fs.mkdirSync(userData, { recursive: true });
+    fs.writeFileSync(settingsFile, JSON.stringify({ serverUrl: '' }));
+  }
   const electronApp = await _electron.launch({
     executablePath: require('electron'),
     args: [path.join(ROOT, 'apps', 'desktop'), `--user-data-dir=${userData}`],

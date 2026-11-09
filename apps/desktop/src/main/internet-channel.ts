@@ -199,8 +199,10 @@ export class InternetChannel {
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (err) {
-      const cause = (err as Error & { cause?: Error }).cause?.message ?? (err as Error).message;
-      throw new Error(`Could not reach the relay: ${cause}`);
+      // A refused connection can have an empty message and only a code.
+      const cause = (err as Error & { cause?: Error & { code?: string } }).cause;
+      const reason = cause?.message || cause?.code || (err as Error).message || 'no response';
+      throw new Error(`Could not reach the relay: ${reason}`);
     }
     if (!response.ok) {
       const body = (await response.json().catch(() => null)) as { error?: string } | null;

@@ -1,6 +1,6 @@
 import type { NetworkInterfaceInfo } from 'node:os';
 import { describe, expect, it } from 'vitest';
-import { isLoopbackUrl, normalizeServerUrl, rankLanAddresses } from './network';
+import { isLoopbackUrl, normalizeServerUrl, rankLanAddresses, resolveServerUrl } from './network';
 
 const v4 = (address: string, internal = false) => ({ address, family: 'IPv4', internal }) as NetworkInterfaceInfo;
 
@@ -31,6 +31,24 @@ describe('normalizeServerUrl', () => {
   it('rejects other schemes and empty input', () => {
     expect(() => normalizeServerUrl('ftp://x.test')).toThrow();
     expect(() => normalizeServerUrl('   ')).toThrow();
+  });
+});
+
+describe('resolveServerUrl', () => {
+  const builtIn = 'https://relay.example.com';
+
+  it('replaces the default an old version saved', () => {
+    expect(resolveServerUrl('http://localhost:3001', builtIn)).toBe(builtIn);
+  });
+
+  it('keeps an address the user chose, including turning the relay off', () => {
+    expect(resolveServerUrl('https://mine.example.com', builtIn)).toBe('https://mine.example.com');
+    expect(resolveServerUrl('http://localhost:4000', builtIn)).toBe('http://localhost:4000');
+    expect(resolveServerUrl('', builtIn)).toBe('');
+  });
+
+  it('leaves the old address alone in a build with no built-in relay', () => {
+    expect(resolveServerUrl('http://localhost:3001', '')).toBe('http://localhost:3001');
   });
 });
 

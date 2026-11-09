@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { app, safeStorage } from 'electron';
+import { resolveServerUrl } from './network';
 
 declare const __DEFAULT_RELAY_URL__: string;
 
@@ -46,6 +47,8 @@ export class SettingsStore {
         console.error('[settings] Could not read settings, using defaults:', (err as Error).message);
       }
     }
+    const resolved = resolveServerUrl(this.data.serverUrl, __DEFAULT_RELAY_URL__);
+    if (resolved !== this.data.serverUrl) this.serverUrl = resolved;
   }
 
   get serverUrl(): string {
