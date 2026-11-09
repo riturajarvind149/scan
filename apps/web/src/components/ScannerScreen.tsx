@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { MAX_DECODED_TEXT_LENGTH } from '@qr2win/shared-types';
 import { useQrCamera } from '../hooks/useQrCamera';
 import { copyRegion, cropRegion, encodeQuickly, encodeRawImage, readPixels } from '../lib/capture';
@@ -9,9 +9,13 @@ import { ScannerClient } from '../lib/scanner-client';
 
 /** A code still in view is not a new scan; it counts again only after this long out of view. */
 const SAME_CODE_COOLDOWN_MS = 3000;
-/** How long after sending to keep looking for a sharper frame to enhance. Nothing waits on this. */
-const BEST_FRAME_WINDOW_MS = 350;
+/**
+ * How long after sending to keep looking for a sharper frame to straighten. The laptop waits briefly
+ * for the straightened copy before showing its popup, so this stays short.
+ */
+const BEST_FRAME_WINDOW_MS = 150;
 const VISIBLE_RESULTS = 2;
+const TICK_VISIBLE_MS = 1500;
 
 interface ScannerScreenProps {
   /** Null when the relay's link is public, so there is nothing to pair or unpair. */
@@ -57,16 +61,15 @@ function scanLabel(scan: ScanEntry): string {
 export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerScreenProps) {
   const client = useMemo(() => new PhoneClient(WS_URL, pairing?.token ?? null), [pairing?.token]);
   const state = useSyncExternalStore(client.subscribe, client.getSnapshot);
-  const [cameraOn, setCameraOn] = useState(true);
+  /** Changes with each new scan, which replays the tick. Zero when it is hidden. */
+  const [tick, setTick] = useState(0);
+  const [canRescan, setCanRescan] = useState(false);
+  const screenRef = useRef<HTMLElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const lastSeen = useRef(new Map<string, number>());
+  const tickCount = useRef(0);
   const pending = useRef(new Map<string, PendingCapture>());
   const enhancer = useRef<ScannerClient | null>(null);
-  const pinch = useRef<{ pointers: Map<number, { x: number; y: number }>; distance: number; zoom: number }>({
-    pointers: new Map(),
-    distance: 0,
-    zoom: 1,
-  });
 
   useEffect(() => {
     client.start();
@@ -77,13 +80,16 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
     if (state.revoked) onRevoked?.();
   }, [state.revoked, onRevoked]);
 
-  useEffect(
-    () => () => {
-      enhancer.current?.terminate();
+  useEffect(() => {
+    // Loaded up front: fetching the decoder during the first scan would make that copy arrive late.
+    const worker = new ScannerClient();
+    enhancer.current = worker;
+    void worker.detect({ data: new Uint8ClampedArray(4 * 8 * 8), width: 8, height: 8 }, false, false).catch(() => undefined);
+    return () => {
+      worker.terminate();
       enhancer.current = null;
-    },
-    [],
-  );
+    };
+  }, []);
 
   /** Makes the clearer copy on its own worker, so detection never pauses for it. */
   const enhanceInBackground = useCallback(
@@ -91,7 +97,7 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
       const capture = pending.current.get(text);
       if (!capture) return;
       pending.current.delete(text);
-      enhancer.current ??= new ScannerClient();
+      if (!enhancer.current) return;
       void enhancer.current
         .enhance(readPixels(capture.crop), capture.text)
         .then((result) => {
@@ -137,6 +143,9 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
         if (!photo) continue;
         const scanId = newScanId();
         navigator.vibrate?.(40);
+        tickCount.current += 1;
+        setTick(tickCount.current);
+        setCanRescan(true);
         client.sendScan({
           type: 'qr-image',
           scanId,
@@ -157,35 +166,74 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
     [client, enhanceInBackground],
   );
 
-  const camera = useQrCamera(videoRef, cameraOn, onDetections);
+  useEffect(() => {
+    if (tick === 0) return;
+    const timer = setTimeout(() => setTick(0), TICK_VISIBLE_MS);
+    return () => clearTimeout(timer);
+  }, [tick]);
+
+  /** Forgets what has been sent, so a code still in view goes out again as a new scan. */
+  const rescan = () => {
+    // A scan still choosing its sharpest frame finishes now, or it would absorb the new one.
+    for (const text of [...pending.current.keys()]) enhanceInBackground(text);
+    lastSeen.current.clear();
+    setTick(0);
+    setCanRescan(false);
+  };
+
+  const camera = useQrCamera(videoRef, true, onDetections);
+  const zoomControl = useRef(camera.zoom);
+  zoomControl.current = camera.zoom;
+
+  // Touch events, because browsers cancel pointer events once they treat two fingers as a page zoom.
+  useEffect(() => {
+    const screenElement = screenRef.current;
+    if (!screenElement) return;
+    let startDistance = 0;
+    let startZoom = 1;
+    const fingers = (event: TouchEvent) => [...event.touches].filter((touch) => !(touch.target instanceof HTMLInputElement));
+    const distance = ([a, b]: Touch[]) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+
+    const onTouchStart = (event: TouchEvent) => {
+      const touches = fingers(event);
+      if (touches.length !== 2) return;
+      startDistance = distance(touches);
+      startZoom = zoomControl.current.value;
+      if (event.cancelable) event.preventDefault();
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const touches = fingers(event);
+      if (touches.length !== 2 || startDistance === 0) return;
+      if (event.cancelable) event.preventDefault();
+      const { min, max, set } = zoomControl.current;
+      set(Math.min(max, Math.max(min, startZoom * (distance(touches) / startDistance))));
+    };
+    const onTouchEnd = (event: TouchEvent) => {
+      if (fingers(event).length < 2) startDistance = 0;
+    };
+    // Safari's own page zoom, which ignores everything above.
+    const stopPageZoom = (event: Event) => event.preventDefault();
+
+    screenElement.addEventListener('touchstart', onTouchStart, { passive: false });
+    screenElement.addEventListener('touchmove', onTouchMove, { passive: false });
+    screenElement.addEventListener('touchend', onTouchEnd);
+    screenElement.addEventListener('touchcancel', onTouchEnd);
+    document.addEventListener('gesturestart', stopPageZoom);
+    document.addEventListener('gesturechange', stopPageZoom);
+    return () => {
+      screenElement.removeEventListener('touchstart', onTouchStart);
+      screenElement.removeEventListener('touchmove', onTouchMove);
+      screenElement.removeEventListener('touchend', onTouchEnd);
+      screenElement.removeEventListener('touchcancel', onTouchEnd);
+      document.removeEventListener('gesturestart', stopPageZoom);
+      document.removeEventListener('gesturechange', stopPageZoom);
+    };
+  }, []);
   const connection = connectionLabel(state);
   const { zoom, brightness, previewScale, frameSize, detections } = camera;
 
-  const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    pinch.current.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    if (pinch.current.pointers.size === 2) {
-      const [a, b] = [...pinch.current.pointers.values()];
-      pinch.current.distance = Math.hypot(a.x - b.x, a.y - b.y);
-      pinch.current.zoom = zoom.value;
-    }
-  };
-
-  const onPointerMove = (event: PointerEvent<HTMLDivElement>) => {
-    if (!pinch.current.pointers.has(event.pointerId)) return;
-    pinch.current.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    if (pinch.current.pointers.size === 2 && pinch.current.distance > 0) {
-      const [a, b] = [...pinch.current.pointers.values()];
-      const ratio = Math.hypot(a.x - b.x, a.y - b.y) / pinch.current.distance;
-      zoom.set(Math.min(zoom.max, Math.max(zoom.min, pinch.current.zoom * ratio)));
-    }
-  };
-
-  const onPointerEnd = (event: PointerEvent<HTMLDivElement>) => {
-    pinch.current.pointers.delete(event.pointerId);
-  };
-
   return (
-    <main className="scanner">
+    <main className="scanner" ref={screenRef}>
       <header className="scanner-bar">
         <span className={`pill ${connection.tone}`} role="status">
           {connection.text}
@@ -197,20 +245,41 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
         ) : null}
       </header>
 
-      <div className="viewfinder" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerEnd} onPointerCancel={onPointerEnd}>
+      <div className="viewfinder">
         <div className="viewfinder-zoom" style={previewScale > 1 ? { transform: `scale(${previewScale})` } : undefined}>
-          <video ref={videoRef} playsInline muted hidden={!cameraOn} />
-          {cameraOn ? (
-            <svg className="code-outlines" viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="xMidYMid slice" aria-hidden="true">
-              {detections.map((detection) => (
-                <polygon key={detection.text} points={detection.corners.map((point) => `${point.x},${point.y}`).join(' ')} />
-              ))}
-            </svg>
-          ) : null}
+          <video ref={videoRef} playsInline muted />
+          <svg className="code-outlines" viewBox={`0 0 ${frameSize.width} ${frameSize.height}`} preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+            {detections.map((detection) => (
+              <polygon key={detection.text} points={detection.corners.map((point) => `${point.x},${point.y}`).join(' ')} />
+            ))}
+          </svg>
         </div>
-        {!cameraOn ? <p className="viewfinder-note">Camera is off.</p> : null}
-        {cameraOn && !camera.running && !camera.error ? <p className="viewfinder-note">Starting camera…</p> : null}
+        {!camera.running && !camera.error ? <p className="viewfinder-note">Starting camera…</p> : null}
         {camera.error ? <p className="viewfinder-note error" role="alert">{camera.error}</p> : null}
+        {tick > 0 ? (
+          <svg key={tick} className="scan-tick" viewBox="0 0 96 96" aria-hidden="true">
+            <circle cx="48" cy="48" r="48" />
+            <path d="M26 50 l15 15 l29 -32" />
+          </svg>
+        ) : null}
+        {camera.running && brightness ? (
+          <label className="camera-bar left">
+            <span aria-hidden="true">Light</span>
+            <input aria-label="Brightness" type="range" min={brightness.min} max={brightness.max} step={brightness.step} value={brightness.value} onChange={(event) => brightness.set(Number(event.target.value))} />
+          </label>
+        ) : null}
+        {camera.running ? (
+          <label className="camera-bar right">
+            <span aria-hidden="true">{zoom.value.toFixed(1)}×</span>
+            <input aria-label="Zoom" type="range" min={zoom.min} max={zoom.max} step={zoom.step} value={zoom.value} onChange={(event) => zoom.set(Number(event.target.value))} />
+          </label>
+        ) : null}
+      </div>
+
+      <div className="rescan-row">
+        <button type="button" className="rescan" disabled={!canRescan} onClick={rescan}>
+          Rescan
+        </button>
       </div>
 
       <footer className="scanner-panel">
@@ -227,23 +296,6 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
         ) : (
           <p className="muted">Point your camera at any QR codes. Each one appears on your laptop automatically.</p>
         )}
-        {cameraOn && camera.running ? (
-          <div className="camera-controls">
-            <label>
-              <span>Zoom {zoom.value.toFixed(1)}×</span>
-              <input type="range" min={zoom.min} max={zoom.max} step={zoom.step} value={zoom.value} onChange={(event) => zoom.set(Number(event.target.value))} />
-            </label>
-            {brightness ? (
-              <label>
-                <span>Brightness</span>
-                <input type="range" min={brightness.min} max={brightness.max} step={brightness.step} value={brightness.value} onChange={(event) => brightness.set(Number(event.target.value))} />
-              </label>
-            ) : null}
-          </div>
-        ) : null}
-        <button type="button" className="secondary" onClick={() => setCameraOn((value) => !value)}>
-          {cameraOn ? 'Turn camera off' : 'Turn camera on'}
-        </button>
       </footer>
     </main>
   );

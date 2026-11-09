@@ -1,7 +1,7 @@
 // End-to-end test of the real product: the built relay server, the real Electron app, and a real
 // browser (Microsoft Edge) as the phone, whose camera is fed a video of actual QR codes.
 //
-// Run with: npm run test:e2e     (Windows; shows real toasts and popups while it runs)
+// Run with: npm run test:e2e     (Windows; shows real popups while it runs)
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -36,12 +36,21 @@ function recordUploads() {
   WebSocket.prototype.send = function record(data) {
     try {
       const message = JSON.parse(data);
-      if (message.type === 'qr-image') window.uploads.push({ type: message.type, bytes: data.length, waitedMs: Date.now() - message.timestamp, hasEnhanced: !!message.enhanced });
+      if (message.type === 'qr-image') window.uploads.push({ type: message.type, bytes: data.length, waitedMs: Date.now() - message.timestamp, hasEnhanced: !!message.enhanced, text: message.decodedText });
       if (message.type === 'qr-enhanced') window.uploads.push({ type: message.type, bytes: data.length });
     } catch {
       // Not ours.
     }
     return send.call(this, data);
+  };
+}
+
+/** Makes the simulated camera report zoom and brightness controls, and records what gets set. */
+function offerCameraControls() {
+  window.cameraSettings = [];
+  MediaStreamTrack.prototype.getCapabilities = () => ({ zoom: { min: 1, max: 8, step: 0.1 }, exposureCompensation: { min: -2, max: 2, step: 0.1 } });
+  MediaStreamTrack.prototype.applyConstraints = async (constraints) => {
+    window.cameraSettings.push(constraints.advanced?.[0] ?? {});
   };
 }
 
@@ -148,16 +157,23 @@ async function launchDesktop(userData) {
     args: [path.join(ROOT, 'apps', 'desktop'), `--user-data-dir=${userData}`],
     env: { ...process.env, ELECTRON_ENABLE_LOGGING: '0' },
   });
-  // Record notifications as the app creates them, so the test can click them like the user would.
-  await electronApp.evaluate(({ Notification }) => {
-    globalThis.notifications = [];
+  // Count every popup as the app opens it, including ones already closed, and any toast about a scan.
+  await electronApp.evaluate(({ app, Notification }) => {
+    globalThis.popupsOpened = 0;
+    globalThis.scanToasts = 0;
+    globalThis.popupsTookFocus = 0;
+    app.on('browser-window-created', (_event, win) => {
+      win.webContents.once('did-finish-load', () => {
+        if (win.webContents.getURL().endsWith('popup.html')) globalThis.popupsOpened++;
+      });
+      // Checked just after appearing, since Windows may later hand it focus when another window closes.
+      win.once('show', () => setTimeout(() => {
+        if (!win.isDestroyed() && win.getTitle() === 'QR code' && win.isFocused()) globalThis.popupsTookFocus++;
+      }, 100));
+    });
     const show = Notification.prototype.show;
     Notification.prototype.show = function record() {
-      globalThis.notifications.push({ instance: this, title: this.title, body: this.body, failed: false });
-      const entry = globalThis.notifications.at(-1);
-      this.on('failed', () => {
-        entry.failed = true;
-      });
+      if (this.title === 'QR code received') globalThis.scanToasts++;
       return show.call(this);
     };
   });
@@ -171,15 +187,9 @@ async function launchDesktop(userData) {
   return { electronApp, page, problems };
 }
 
-const notificationCount = (app) => app.evaluate(() => globalThis.notifications.filter((n) => n.title === 'QR code received').length);
+const popupsOpened = (app) => app.evaluate(() => globalThis.popupsOpened);
 
 const popupWindows = (app) => app.windows().filter((win) => win.url().endsWith('popup.html'));
-
-async function clickNotification(app, index) {
-  await app.evaluate((_electron, at) => {
-    globalThis.notifications.filter((n) => n.title === 'QR code received')[at].instance.emit('click');
-  }, index);
-}
 
 async function readPairingLink(page) {
   await page.click('#showPairing');
@@ -189,25 +199,21 @@ async function readPairingLink(page) {
   return { url: qr.text, code: await page.textContent('#pairingCode') };
 }
 
-/** Expects a scan delivered, click-to-open and pixel-faithful. Returns the text of the scan. */
+/** Expects a scan to pop up by itself, straightened and reading the same. Returns the text of the scan. */
 async function verifyScanCycle(app, page, phone, label, screenshots) {
-  const before = await notificationCount(app);
-  const popupsBefore = popupWindows(app).length;
+  const already = new Set(popupWindows(app));
 
   await until(`${label}: a QR scan shows as delivered on the phone`, async () =>
     (await phone.textContent('.scan-result strong').catch(() => ''))?.includes('On your laptop'),
   );
-  await until(`${label}: desktop raised a notification`, async () => (await notificationCount(app)) > before);
-  const failed = await app.evaluate(() => globalThis.notifications.some((n) => n.failed));
-  assert.equal(failed, false, 'Windows must accept the toast');
-  ok(`${label}: phone reports delivery and Windows accepted the notification`);
+  let popup;
+  await until(`${label}: a popup opens with nothing clicked`, () => {
+    popup = popupWindows(app).find((win) => !already.has(win));
+    return !!popup;
+  });
+  assert.equal(await app.evaluate(() => globalThis.scanToasts), 0, 'a scan must not raise a notification as well');
+  ok(`${label}: phone reports delivery and the popup opens by itself, with no notification`);
 
-  assert.equal(popupWindows(app).length, popupsBefore, 'the popup must wait for a click');
-  ok(`${label}: no popup appears before the notification is clicked`);
-
-  const opening = app.waitForEvent('window');
-  await clickNotification(app, before);
-  const popup = await opening;
   await popup.waitForSelector('#image img');
   await until(`${label}: popup image renders`, () => popup.$eval('#image img', (img) => img.complete && img.naturalWidth > 0));
 
@@ -215,7 +221,11 @@ async function verifyScanCycle(app, page, phone, label, screenshots) {
     BrowserWindow.getAllWindows().filter((win) => win.getTitle() === 'QR code').every((win) => win.isAlwaysOnTop()),
   );
   assert.equal(alwaysOnTop, true);
-  ok(`${label}: clicking opens an always-on-top popup showing the image`);
+  await until(`${label}: the popup becomes visible`, () =>
+    app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((win) => win.getTitle() === 'QR code' && win.isVisible())), 3000);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(await app.evaluate(() => globalThis.popupsTookFocus), 0, 'a popup opening must not take focus from what is being typed');
+  ok(`${label}: the popup is always on top and leaves the keyboard focus alone`);
 
   const image = await decodeDataUrl(await popup.$eval('#image img', (img) => img.src));
   assert.ok(ALL_CODES.includes(image.text), `popup image must decode to a fed code, got ${image.text}`);
@@ -224,11 +234,16 @@ async function verifyScanCycle(app, page, phone, label, screenshots) {
   const footer = await popup.textContent('#details');
   assert.ok(footer.includes(image.text));
 
-  await until(`${label}: clearer copy arrives`, () => popup.isVisible('#version'), 10_000);
-  await until(`${label}: popup swaps in the clearer copy`, async () => {
-    const shown = await decodeDataUrl(await popup.$eval('#image img', (img) => img.src));
+  await until(`${label}: straightened copy arrives`, () => popup.isVisible('#version'), 10_000);
+  let shown;
+  await until(`${label}: popup swaps in the straightened copy`, async () => {
+    const src = await popup.$eval('#image img', (img) => img.src);
+    if (!src.startsWith('data:image/png')) return false;
+    shown = await decodeDataUrl(src);
     return shown.text === image.text;
   });
+  assert.equal(shown.width, shown.height, 'the straightened code must be square');
+  ok(`${label}: the straightened copy is square (${shown.width}x${shown.height}) and reads the same`);
   await popup.click('#toggleVersion');
   const original = await decodeDataUrl(await popup.$eval('#image img', (img) => img.src));
   assert.equal(original.text, image.text, 'the original and the clearer copy must read the same');
@@ -423,6 +438,82 @@ async function main() {
 
     await verifyScanCycle(electronApp, page, internetPhone, 'internet', true);
 
+    // ── The scanner's own controls ──────────────────────────────
+    console.log('Scanner controls');
+    const controlsContext = await browser.newContext(IPHONE_SIZED);
+    await controlsContext.addInitScript(recordUploads);
+    await controlsContext.addInitScript(offerCameraControls);
+    const controlsPhone = await controlsContext.newPage();
+    watchPhone(controlsPhone);
+    await controlsPhone.goto(relayUrl);
+    await controlsPhone.waitForSelector('input[aria-label="Zoom"]');
+
+    assert.equal(await controlsPhone.isVisible('text=Turn camera'), false, 'the camera button must be gone');
+    const brightnessBar = await controlsPhone.locator('.camera-bar.left').boundingBox();
+    const zoomBar = await controlsPhone.locator('.camera-bar.right').boundingBox();
+    assert.ok(await controlsPhone.locator('.camera-bar.left input[aria-label="Brightness"]').count(), 'brightness must be the left bar');
+    assert.ok(await controlsPhone.locator('.camera-bar.right input[aria-label="Zoom"]').count(), 'zoom must be the right bar');
+    assert.ok(brightnessBar.x + brightnessBar.width <= 80, `brightness should hug the left edge, at ${brightnessBar.x}`);
+    assert.ok(zoomBar.x >= IPHONE_SIZED.viewport.width - 80, `zoom should hug the right edge, at ${zoomBar.x}`);
+    assert.ok(zoomBar.height > zoomBar.width * 2, 'the bars must stand upright');
+    assert.equal(await controlsPhone.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'the page must not scroll sideways');
+    ok('the camera button is gone, with brightness upright on the left and zoom on the right');
+
+    const rescanButton = controlsPhone.locator('button.rescan');
+    await until('a green tick appears on a scan', () => controlsPhone.locator('.scan-tick').isVisible(), 40_000);
+    assert.equal(await controlsPhone.$eval('.scan-tick circle', (circle) => getComputedStyle(circle).fill), 'rgb(22, 163, 74)');
+    assert.ok(await rescanButton.isEnabled(), 'Rescan must be available after a scan');
+    await controlsPhone.screenshot({ path: path.join(OUTPUT, 'scanner-tick.png') });
+    await until('the tick goes away by itself', async () => !(await controlsPhone.locator('.scan-tick').isVisible()) || (await controlsPhone.evaluate(() => window.uploads.length > 2)), 5000);
+    ok('a scan shows a green tick in the scanner, with Rescan below it');
+
+    // Right after a scan its code is still in view and would normally not go out again for seconds.
+    // The camera's video moves on to other codes, so only the same text counts as a rescan.
+    const sent = () => controlsPhone.evaluate(() => window.uploads.filter((u) => u.type === 'qr-image').map((u) => u.text));
+    const sentBefore = (await sent()).length;
+    await until('another scan to rescan', async () => (await sent()).length > sentBefore, 40_000);
+    const sentSoFar = await sent();
+    await rescanButton.click();
+    assert.equal(await controlsPhone.locator('.scan-tick').count(), 0, 'Rescan clears the tick');
+    await until('Rescan sends the same code again', async () => (await sent()).slice(sentSoFar.length).includes(sentSoFar.at(-1)), 1500);
+    ok('Rescan sends the code in view again straight away');
+
+    // A real two-finger pinch, sent as touch input to the browser rather than called in the page.
+    const touch = await controlsContext.newCDPSession(controlsPhone);
+    const pinchTo = async (type, spread) => touch.send('Input.dispatchTouchEvent', {
+      type,
+      touchPoints: type === 'touchEnd' ? [] : [{ x: 195 - spread, y: 300, id: 1 }, { x: 195 + spread, y: 300, id: 2 }],
+    });
+    const zoomValue = () => controlsPhone.$eval('input[aria-label="Zoom"]', (input) => Number(input.value));
+    const zoomStart = await zoomValue();
+    await pinchTo('touchStart', 40);
+    for (const spread of [50, 60, 70, 80]) await pinchTo('touchMove', spread);
+    await pinchTo('touchEnd', 0);
+    await until('pinching out zooms in', async () => (await zoomValue()) > zoomStart * 1.8, 3000);
+    await until('the camera follows the pinch', () => controlsPhone.evaluate((target) => window.cameraSettings.some((setting) => setting.zoom >= target), zoomStart * 1.8), 3000);
+    assert.equal(await controlsPhone.evaluate(() => visualViewport.scale), 1, 'the page itself must not zoom');
+    const zoomed = await zoomValue();
+    await pinchTo('touchStart', 80);
+    for (const spread of [70, 60, 50, 40]) await pinchTo('touchMove', spread);
+    await pinchTo('touchEnd', 0);
+    await until('pinching in zooms out', async () => (await zoomValue()) < zoomed / 1.8, 3000);
+    ok(`two fingers zoom the camera both ways (${zoomStart.toFixed(1)}× to ${zoomed.toFixed(1)}× and back), and the bar follows`);
+    await controlsPhone.screenshot({ path: path.join(OUTPUT, 'scanner-controls.png') });
+
+    // Dragging a bar upward raises it, which confirms the rotated slider still works by touch.
+    const zoomInput = await controlsPhone.locator('input[aria-label="Zoom"]').boundingBox();
+    const dragBar = async (type, y) => touch.send('Input.dispatchTouchEvent', {
+      type,
+      touchPoints: type === 'touchEnd' ? [] : [{ x: zoomInput.x + zoomInput.width / 2, y, id: 1 }],
+    });
+    const beforeDrag = await zoomValue();
+    await dragBar('touchStart', zoomInput.y + zoomInput.height * 0.8);
+    for (const part of [0.6, 0.4, 0.2]) await dragBar('touchMove', zoomInput.y + zoomInput.height * part);
+    await dragBar('touchEnd', 0);
+    await until('dragging the bar up zooms in', async () => (await zoomValue()) > beforeDrag, 3000);
+    ok('dragging the upright zoom bar upward zooms in');
+    await controlsContext.close();
+
     await until('several scans sent', async () => (await internetPhone.evaluate(() => window.uploads.filter((u) => u.type === 'qr-image').length)) >= 3, 40_000);
     const uploads = await internetPhone.evaluate(() => window.uploads);
     const firstSends = uploads.filter((upload) => upload.type === 'qr-image');
@@ -454,21 +545,31 @@ async function main() {
     await phoneTwo.goto(relayUrl);
     await until('second phone connected', async () => (await phoneTwo.textContent('.pill').catch(() => '')).includes('Laptop connected'));
 
-    const secondBefore = await notificationCount(second.electronApp);
-    const firstBefore = await notificationCount(electronApp);
+    const secondBefore = await popupsOpened(second.electronApp);
+    const firstBefore = await popupsOpened(electronApp);
     await until('both laptops receive scans', async () =>
-      (await notificationCount(second.electronApp)) > secondBefore && (await notificationCount(electronApp)) > firstBefore, 30_000);
+      (await popupsOpened(second.electronApp)) > secondBefore && (await popupsOpened(electronApp)) > firstBefore, 30_000);
     const senders = await Promise.all([internetPhone, phoneTwo].map((phone) => phone.textContent('.scan-result strong')));
     assert.ok(senders.every((text) => text.includes('On your laptop')), `both phones must report delivery: ${senders}`);
     ok('scans from two phones reach both laptops');
 
-    // Live view shows codes as they arrive, with no notification to click.
+    // Several codes get a popup each, side by side rather than on top of each other.
+    await until('several popups open', () => popupWindows(electronApp).length >= 2, 30_000);
+    const overlapping = await electronApp.evaluate(({ BrowserWindow }) => {
+      const boxes = BrowserWindow.getAllWindows().filter((win) => win.getTitle() === 'QR code').map((win) => win.getBounds());
+      return boxes.some((a, i) => boxes.some((b, j) => i < j && a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height));
+    });
+    assert.equal(overlapping, false, 'popups must not cover each other');
+    ok('each code gets its own popup, and none covers another');
+
+    // Live view shows codes in one window as they arrive, with no popup for each.
     const liveOpening = electronApp.waitForEvent('window');
     await page.check('#liveView');
     const liveWindow = await liveOpening;
     await liveWindow.waitForLoadState('domcontentloaded');
-    const liveBefore = await notificationCount(electronApp);
     const liveAtStart = await liveWindow.$$eval('.tile', (tiles) => tiles.length);
+    await new Promise((resolve) => setTimeout(resolve, 1000)); // lets a scan already on its way finish
+    const liveBefore = await popupsOpened(electronApp);
     await until('live window shows codes', async () => {
       const texts = await liveWindow.$$eval('.tile .text', (nodes) => nodes.map((node) => node.textContent));
       return texts.includes(CODE_LEFT) && texts.includes(CODE_RIGHT);
@@ -476,12 +577,12 @@ async function main() {
     await liveWindow.screenshot({ path: path.join(OUTPUT, 'live-view.png') });
     const liveTile = await decodeDataUrl(await liveWindow.$eval('.tile img', (img) => img.src));
     assert.ok(ALL_CODES.includes(liveTile.text), 'a live tile must show a readable code');
-    assert.equal(await notificationCount(electronApp), liveBefore, 'live view replaces notifications');
+    assert.equal(await popupsOpened(electronApp), liveBefore, 'live view replaces popups');
     assert.equal(await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((win) => win.getTitle().startsWith('QR codes, live')).isAlwaysOnTop()), true);
-    ok(`live view shows each code on its own as it arrives, on top, with no notification (started with ${liveAtStart} tiles)`);
+    ok(`live view shows each code on its own as it arrives, on top, with no popups (started with ${liveAtStart} tiles)`);
     await page.uncheck('#liveView');
     await until('live window closed', async () => !electronApp.windows().includes(liveWindow) || liveWindow.isClosed());
-    ok('turning live view off closes it and brings notifications back');
+    ok('turning live view off closes it and brings popups back');
 
     // Pausing stops scans, and resuming restarts them.
     await admin.click('text=Pause scanning');
@@ -522,7 +623,7 @@ async function main() {
     ({ electronApp, page, problems } = await launchDesktop(userData));
     await until('reconnected to relay after restart', async () => (await page.textContent('#internetStatus')).includes('ready'));
     await until('phone sees laptop again', async () => (await internetPhone.textContent('.pill')).includes('Laptop connected'));
-    await until('held scan delivered', async () => (await notificationCount(electronApp)) > 0, 20_000);
+    await until('held scan delivered', async () => (await popupsOpened(electronApp)) > 0, 20_000);
     ok('after restarting, the desktop reconnects unattended and the held scan arrives');
 
     // â”€â”€ Free hosting: the relay restarts and its disk is gone â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -537,8 +638,8 @@ async function main() {
         (await internetPhone.textContent('.pill')).includes('Laptop connected') &&
         (await page.textContent('#internetStatus')).includes('ready'), 45_000);
       ok('after a relay restart with an empty disk, phone and laptop reconnect with no setup');
-      const held = await notificationCount(electronApp);
-      await until('scans still flow after restart', async () => (await notificationCount(electronApp)) > held, 30_000);
+      const held = await popupsOpened(electronApp);
+      await until('scans still flow after restart', async () => (await popupsOpened(electronApp)) > held, 30_000);
       ok('scans keep flowing after that restart');
     } finally {
       relayAgain.kill();
