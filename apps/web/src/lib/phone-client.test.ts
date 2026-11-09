@@ -95,6 +95,32 @@ describe('PhoneClient', () => {
     client.stop();
   });
 
+  it('sends a clearer copy as an update once the scan is out', () => {
+    const { client, socket } = connectedClient();
+    const enhanced = { mimeType: 'image/png' as const, width: 1, height: 1, imageBase64: 'AAAA', method: 'squared up' };
+    client.sendScan(payload('scan-1001'));
+    client.addEnhancement('scan-1001', enhanced);
+    expect(socket.sent.map((message) => message.type)).toContain('qr-enhanced');
+    client.stop();
+  });
+
+  it('keeps a clearer copy with a scan that has not gone out yet', () => {
+    const { client, socket } = connectedClient();
+    socket.serverClose(1006);
+    const enhanced = { mimeType: 'image/png' as const, width: 1, height: 1, imageBase64: 'AAAA', method: 'squared up' };
+    client.sendScan(payload('scan-1002'));
+    client.addEnhancement('scan-1002', enhanced);
+
+    vi.advanceTimersByTime(2000);
+    const next = latestSocket();
+    next.onopen?.();
+    next.receive({ type: 'auth-result', success: true });
+    next.receive({ type: 'connection-status', desktopOnline: true });
+    const sent = next.sent.find((message) => message.type === 'qr-image') as unknown as { enhanced?: unknown };
+    expect(sent.enhanced).toEqual(enhanced);
+    client.stop();
+  });
+
   it('holds a scan while the laptop is offline and sends it when it returns', () => {
     const { client, socket } = connectedClient();
     socket.receive({ type: 'connection-status', desktopOnline: false });

@@ -20,6 +20,10 @@ export interface EncodedImage {
   height: number;
 }
 
+/** Big enough to read any code, small enough to arrive quickly over a phone connection. */
+const QUICK_MAX_SIZE = 1000;
+const QUICK_QUALITY = 0.92;
+
 /** A QR code needs a clear margin to stay scannable, so the crop keeps some of its surroundings. */
 const QUIET_ZONE_RATIO = 0.14;
 
@@ -68,6 +72,25 @@ export function encodeCanvas(source: HTMLCanvasElement): EncodedImage | null {
     canvas = smaller;
   }
   return null;
+}
+
+/** Encodes the photo sent the moment a code is seen. Speed matters here; the clearer copy follows. */
+export function encodeQuickly(source: HTMLCanvasElement): EncodedImage | null {
+  const scale = Math.min(1, QUICK_MAX_SIZE / Math.max(source.width, source.height));
+  let canvas = source;
+  if (scale < 1) {
+    canvas = document.createElement('canvas');
+    canvas.width = Math.round(source.width * scale);
+    canvas.height = Math.round(source.height * scale);
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+    context.imageSmoothingQuality = 'high';
+    context.drawImage(source, 0, 0, canvas.width, canvas.height);
+  }
+  const base64 = encode(canvas, 'image/jpeg', QUICK_QUALITY);
+  return base64 && base64.length <= MAX_IMAGE_BASE64_LENGTH
+    ? { base64, mimeType: 'image/jpeg', width: canvas.width, height: canvas.height }
+    : encodeCanvas(canvas);
 }
 
 export function encodeRawImage(image: RawImage): EncodedImage | null {

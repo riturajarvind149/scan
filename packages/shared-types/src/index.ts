@@ -99,7 +99,7 @@ export interface QrImagePayload {
   imageBase64: string;
   /** Decoded QR content. Display only: never open or execute it. */
   decodedText: string;
-  /** A clearer copy, present only if independent decoders read it as exactly `decodedText`. */
+  /** A clearer copy, present only if independent decoders read it as exactly `decodedText`. Usually follows as a QrEnhanced. */
   enhanced?: EnhancedImage;
 }
 
@@ -112,6 +112,16 @@ export interface EnhancedImage {
   method: string;
 }
 
+/**
+ * Phone → relay → desktop: a clearer copy of a scan already sent, which arrives a moment later so
+ * the scan itself never waits for it. It holds no text, so it cannot change what the scan says.
+ */
+export interface QrEnhanced {
+  type: 'qr-enhanced';
+  scanId: string;
+  enhanced: EnhancedImage;
+}
+
 /** Desktop → relay → phone: the desktop has received and surfaced this scan. */
 export interface QrAck {
   type: 'qr-ack';
@@ -122,7 +132,7 @@ export interface PingMessage {
   type: 'ping';
 }
 
-export type ClientMessage = AuthMessage | QrImagePayload | QrAck | PingMessage;
+export type ClientMessage = AuthMessage | QrImagePayload | QrEnhanced | QrAck | PingMessage;
 
 // ─── Relay → client ────────────────────────────────────────────────────
 export interface AuthResult {
@@ -184,6 +194,7 @@ export type ServerMessage =
   | LaptopJoined
   | ScanDeferred
   | QrImagePayload
+  | QrEnhanced
   | QrAck
   | PongMessage
   | ErrorMessage;
@@ -228,6 +239,13 @@ function validateImage(image: Partial<EnhancedImage>): string | null {
   return null;
 }
 
+export function validateEnhancedImage(enhanced: unknown): string | null {
+  if (typeof enhanced !== 'object' || enhanced === null) return 'Malformed enhanced image';
+  const image = enhanced as Partial<EnhancedImage>;
+  if (typeof image.method !== 'string' || image.method.length > 200) return 'Invalid enhanced image';
+  return validateImage(image);
+}
+
 export function validateQrPayload(p: unknown): string | null {
   if (typeof p !== 'object' || p === null) return 'Malformed scan';
   const scan = p as Partial<QrImagePayload>;
@@ -238,12 +256,7 @@ export function validateQrPayload(p: unknown): string | null {
   }
   const invalid = validateImage(scan as Partial<EnhancedImage>);
   if (invalid) return invalid;
-  if (scan.enhanced !== undefined) {
-    if (typeof scan.enhanced !== 'object' || scan.enhanced === null) return 'Malformed enhanced image';
-    if (typeof scan.enhanced.method !== 'string' || scan.enhanced.method.length > 200) return 'Invalid enhanced image';
-    return validateImage(scan.enhanced);
-  }
-  return null;
+  return scan.enhanced === undefined ? null : validateEnhancedImage(scan.enhanced);
 }
 
 // ─── Laptop invite links ───────────────────────────────────────────────

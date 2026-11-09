@@ -304,6 +304,7 @@ function start(): void {
   Notification.handleActivation((details) => presenter.handleToastActivation(details.arguments));
   const events: ChannelEvents = {
     onScan: (scan, ack) => presenter.receive(scan, ack),
+    onEnhanced: (scanId, enhanced) => presenter.applyEnhancement(scanId, enhanced),
     onPhonePaired,
     onLaptopJoined,
     onChange: broadcastState,

@@ -3,6 +3,7 @@ import {
   WS_HEARTBEAT_INTERVAL_MS,
   WS_PONG_TIMEOUT_MS,
   type ClientMessage,
+  type EnhancedImage,
   type QrImagePayload,
   type ServerMessage,
 } from '@qr2win/shared-types';
@@ -95,6 +96,16 @@ export class PhoneClient {
       this.fail(oldest, 'Too many scans waiting for your laptop.');
     }
     this.transmit(payload.scanId);
+  }
+
+  /**
+   * Adds a clearer copy to a scan. A scan still waiting to send simply carries it, and one already
+   * sent gets it as an update. If this phone is offline by then, the laptop keeps the first photo.
+   */
+  addEnhancement(scanId: string, enhanced: EnhancedImage): void {
+    const entry = this.pending.get(scanId);
+    if (entry) entry.payload.enhanced = enhanced;
+    this.sendRaw({ type: 'qr-enhanced', scanId, enhanced });
   }
 
   private wake = (): void => {

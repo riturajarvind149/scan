@@ -12,9 +12,11 @@ import { createRequire } from 'node:module';
 import jsQR from 'jsqr';
 import { _electron, chromium } from 'playwright-core';
 import { PNG } from 'pngjs';
+import { prepareZXingModule, readBarcodes } from 'zxing-wasm/reader';
 import QRCode from 'qrcode';
 
 const require = createRequire(import.meta.url);
+prepareZXingModule({ overrides: { wasmBinary: fs.readFileSync(require.resolve('zxing-wasm/reader/zxing_reader.wasm')).buffer } });
 const ROOT = path.resolve(import.meta.dirname, '..');
 const OUTPUT = path.join(ROOT, 'e2e', 'output');
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'qr2win-e2e-'));
@@ -26,6 +28,22 @@ const CODE_RIGHT = 'https://example.com/shown-side-by-side/right';
 const CODE_FAR = 'https://example.com/small-and-far-away';
 const CODE_PROJECTOR = 'https://example.com/washed-out-projector';
 const ALL_CODES = [CODE_A, CODE_B, CODE_LEFT, CODE_RIGHT, CODE_FAR, CODE_PROJECTOR];
+
+/** Records what a phone page sends, to measure how big and how quick each scan really is. */
+function recordUploads() {
+  window.uploads = [];
+  const send = WebSocket.prototype.send;
+  WebSocket.prototype.send = function record(data) {
+    try {
+      const message = JSON.parse(data);
+      if (message.type === 'qr-image') window.uploads.push({ type: message.type, bytes: data.length, waitedMs: Date.now() - message.timestamp, hasEnhanced: !!message.enhanced });
+      if (message.type === 'qr-enhanced') window.uploads.push({ type: message.type, bytes: data.length });
+    } catch {
+      // Not ours.
+    }
+    return send.call(this, data);
+  };
+}
 
 const IPHONE_SIZED = { viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true };
 
@@ -105,11 +123,17 @@ function writeCameraVideo(file) {
   fs.closeSync(out);
 }
 
-function decodeDataUrl(dataUrl) {
+/** Reads an image as a scanner would. The first photo of a scan is a JPEG, and the clearer copy a PNG. */
+async function decodeDataUrl(dataUrl) {
   const [header, base64] = dataUrl.split(',');
-  assert.match(header, /^data:image\/png;base64$/);
-  const png = PNG.sync.read(Buffer.from(base64, 'base64'));
-  return { width: png.width, height: png.height, text: jsQR(new Uint8ClampedArray(png.data), png.width, png.height)?.data };
+  const bytes = Buffer.from(base64, 'base64');
+  if (header.startsWith('data:image/png')) {
+    const png = PNG.sync.read(bytes);
+    return { width: png.width, height: png.height, text: jsQR(new Uint8ClampedArray(png.data), png.width, png.height)?.data };
+  }
+  assert.match(header, /^data:image\/jpeg;base64$/);
+  const [result] = await readBarcodes(new Uint8Array(bytes), { formats: ['QRCode'], tryHarder: true });
+  return { width: 0, height: 0, text: result?.isValid ? result.text : undefined };
 }
 
 async function launchDesktop(userData) {
@@ -160,7 +184,7 @@ async function clickNotification(app, index) {
 async function readPairingLink(page) {
   await page.click('#showPairing');
   await page.waitForSelector('#pairing:not([hidden])');
-  const qr = decodeDataUrl(await page.getAttribute('#pairingQr', 'src'));
+  const qr = await decodeDataUrl(await page.getAttribute('#pairingQr', 'src'));
   assert.ok(qr.text, 'the pairing QR must be scannable');
   return { url: qr.text, code: await page.textContent('#pairingCode') };
 }
@@ -193,19 +217,23 @@ async function verifyScanCycle(app, page, phone, label, screenshots) {
   assert.equal(alwaysOnTop, true);
   ok(`${label}: clicking opens an always-on-top popup showing the image`);
 
-  const image = decodeDataUrl(await popup.$eval('#image img', (img) => img.src));
+  const image = await decodeDataUrl(await popup.$eval('#image img', (img) => img.src));
   assert.ok(ALL_CODES.includes(image.text), `popup image must decode to a fed code, got ${image.text}`);
   ok(`${label}: the image shown decodes correctly (${image.width}x${image.height}): ${image.text}`);
 
   const footer = await popup.textContent('#details');
   assert.ok(footer.includes(image.text));
 
-  assert.equal(await popup.isVisible('#version'), true, 'an enhanced copy should have been made of a clean code');
+  await until(`${label}: clearer copy arrives`, () => popup.isVisible('#version'), 10_000);
+  await until(`${label}: popup swaps in the clearer copy`, async () => {
+    const shown = await decodeDataUrl(await popup.$eval('#image img', (img) => img.src));
+    return shown.text === image.text;
+  });
   await popup.click('#toggleVersion');
-  const original = decodeDataUrl(await popup.$eval('#image img', (img) => img.src));
+  const original = await decodeDataUrl(await popup.$eval('#image img', (img) => img.src));
   assert.equal(original.text, image.text, 'the original and the clearer copy must read the same');
   assert.match(await popup.textContent('#versionNote'), /Original/);
-  ok(`${label}: the original photo is one click away and reads the same (${original.width}x${original.height})`);
+  ok(`${label}: the original photo is one click away and reads the same`);
   await popup.click('#toggleVersion');
   assert.equal(await popup.$('#details a'), null, 'scanned text must never become a link');
 
@@ -379,11 +407,12 @@ async function main() {
     await page.click('#tabInternet');
     await page.click('#showPairing');
     await page.waitForSelector('#pairing:not([hidden])');
-    assert.equal(decodeDataUrl(await page.getAttribute('#pairingQr', 'src')).text, relayUrl);
+    assert.equal((await decodeDataUrl(await page.getAttribute('#pairingQr', 'src'))).text, relayUrl);
     assert.equal(await page.isVisible('#pairingCode'), false);
     ok('the app shows a plain QR of the link, with no code');
 
     const phoneOneContext = await browser.newContext(IPHONE_SIZED);
+    await phoneOneContext.addInitScript(recordUploads);
     const internetPhone = await phoneOneContext.newPage();
     watchPhone(internetPhone);
     await internetPhone.goto(relayUrl);
@@ -393,6 +422,19 @@ async function main() {
     ok('opening the link goes straight to the camera, with no pairing screen');
 
     await verifyScanCycle(electronApp, page, internetPhone, 'internet', true);
+
+    await until('several scans sent', async () => (await internetPhone.evaluate(() => window.uploads.filter((u) => u.type === 'qr-image').length)) >= 3, 40_000);
+    const uploads = await internetPhone.evaluate(() => window.uploads);
+    const firstSends = uploads.filter((upload) => upload.type === 'qr-image');
+    const updates = uploads.filter((upload) => upload.type === 'qr-enhanced');
+    const kb = (bytes) => Math.round(bytes / 1024);
+    const biggest = Math.max(...firstSends.map((upload) => upload.bytes));
+    const slowest = Math.max(...firstSends.map((upload) => upload.waitedMs));
+    assert.ok(firstSends.every((upload) => !upload.hasEnhanced), 'the first send must not wait for enhancement');
+    assert.ok(biggest < 400 * 1024, `first upload should be small, was ${kb(biggest)} KB`);
+    assert.ok(slowest < 150, `the scan should go out at once, waited ${slowest} ms`);
+    assert.ok(updates.length > 0, 'clearer copies should follow');
+    ok(`a scan leaves the phone within ${slowest} ms of detection, at ${kb(biggest)} KB or less; the clearer copy follows at ${kb(Math.max(...updates.map((u) => u.bytes)))} KB or less`);
 
     // â”€â”€ Several laptops and several phones â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     console.log('Several laptops and phones');
@@ -432,7 +474,7 @@ async function main() {
       return texts.includes(CODE_LEFT) && texts.includes(CODE_RIGHT);
     }, 70_000);
     await liveWindow.screenshot({ path: path.join(OUTPUT, 'live-view.png') });
-    const liveTile = decodeDataUrl(await liveWindow.$eval('.tile img', (img) => img.src));
+    const liveTile = await decodeDataUrl(await liveWindow.$eval('.tile img', (img) => img.src));
     assert.ok(ALL_CODES.includes(liveTile.text), 'a live tile must show a readable code');
     assert.equal(await notificationCount(electronApp), liveBefore, 'live view replaces notifications');
     assert.equal(await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((win) => win.getTitle().startsWith('QR codes, live')).isAlwaysOnTop()), true);

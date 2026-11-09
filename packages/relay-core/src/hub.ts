@@ -8,11 +8,13 @@ import {
   WS_CLOSE_AUTH_TIMEOUT,
   WS_CLOSE_UNAUTHORIZED,
   WS_HEARTBEAT_INTERVAL_MS,
+  validateEnhancedImage,
   validateQrPayload,
   type ClientMessage,
   type ErrorCode,
   type LaptopSummary,
   type PhoneSummary,
+  type QrEnhanced,
   type QrImagePayload,
   type ServerMessage,
 } from '@qr2win/shared-types';
@@ -248,6 +250,9 @@ export class Hub {
       case 'qr-image':
         this.handleScan(peer, message);
         return;
+      case 'qr-enhanced':
+        this.handleEnhanced(peer, message);
+        return;
       case 'qr-ack':
         this.handleAck(peer, message.scanId);
         return;
@@ -288,6 +293,15 @@ export class Hub {
     // On a retry the phone may have reconnected under a new id, and the ack must reach it there.
     this.scans.set(key, { at: known?.at ?? Date.now(), acked: false, phoneId: identity.phoneId });
     for (const desktop of desktops) desktop.send(scan);
+  }
+
+  /** Forwards a clearer copy, only for a scan this same phone already sent. */
+  private handleEnhanced(peer: Peer, update: QrEnhanced): void {
+    const { identity } = peer;
+    if (identity.role !== 'phone' || typeof update.scanId !== 'string') return;
+    const record = this.scans.get(`${identity.desktopId}:${update.scanId}`);
+    if (!record || record.phoneId !== identity.phoneId || validateEnhancedImage(update.enhanced)) return;
+    for (const desktop of this.desktopPeers(identity.desktopId)) desktop.send(update);
   }
 
   private handleAck(peer: Peer, scanId: unknown): void {

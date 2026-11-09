@@ -183,6 +183,9 @@ export class InternetChannel {
     this.heartbeatTimer = setInterval(() => {
       if (ws.readyState !== WebSocket.OPEN) return;
       ws.ping();
+      // Free hosting sleeps without inbound traffic, and it counts messages. Keeping it awake while
+      // a laptop is on avoids the long wake-up on a scan.
+      ws.send(JSON.stringify({ type: 'ping' }));
       // A half-open socket raises no error by itself, so no pong means the connection is dead.
       this.pongTimer ??= setTimeout(() => ws.terminate(), WS_PONG_TIMEOUT_MS);
     }, WS_HEARTBEAT_INTERVAL_MS);
