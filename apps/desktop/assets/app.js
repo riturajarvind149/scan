@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 let state = null;
 let mode = 'local';
 let expiryTimer = null;
+let firstRender = true;
 
 const STATUS_TEXT = {
   off: 'off',
@@ -113,6 +114,10 @@ function renderScans() {
 
 function render(next) {
   state = next;
+  // Once a relay is set, it is what daily use goes through.
+  if (firstRender && state.internet.serverUrl) selectTab('internet');
+  firstRender = false;
+  $('laptopsSection').hidden = !state.internet.serverUrl;
   renderStatus('localStatus', 'Wi-Fi', state.local);
   renderStatus('internetStatus', 'Internet', state.internet);
   renderPairHint();
@@ -198,6 +203,30 @@ $('saveServer').addEventListener('click', async () => {
     selectTab(mode);
   } catch (err) {
     show('serverError', cleanError(err));
+  }
+});
+
+$('showLaptopCode').addEventListener('click', async () => {
+  show('laptopError', '');
+  show('laptopSuccess', '');
+  try {
+    const { code } = await api.createLaptopCode();
+    $('laptopCode').textContent = code;
+    $('laptopCodeBox').hidden = false;
+  } catch (err) {
+    show('laptopError', cleanError(err));
+  }
+});
+
+$('joinAccount').addEventListener('click', async () => {
+  show('laptopError', '');
+  show('laptopSuccess', '');
+  try {
+    await api.joinAccount($('joinCode').value);
+    $('joinCode').value = '';
+    show('laptopSuccess', 'Joined. This laptop now receives your scans.');
+  } catch (err) {
+    show('laptopError', cleanError(err));
   }
 });
 

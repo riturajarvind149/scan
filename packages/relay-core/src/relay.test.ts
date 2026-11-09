@@ -99,8 +99,8 @@ describe('relay', () => {
   let base: string;
   let clients: Client[];
 
-  async function start(dataFile?: string): Promise<void> {
-    store = new PairingStore(dataFile);
+  async function start(dataFile?: string, secret?: string): Promise<void> {
+    store = new PairingStore(dataFile, secret);
     relay = createRelay({ store });
     server = http.createServer(relay.app);
     relay.hub.attach(server);
@@ -253,6 +253,64 @@ describe('relay', () => {
       await pairPhone(desktop.token);
       const event = await desktopClient.nextOfType('phone-paired');
       expect(event.phone.name).toBe('Test phone');
+    });
+  });
+
+  describe('several laptops', () => {
+    async function joinLaptop(desktopToken: string): Promise<{ token: string; desktopId: string }> {
+      const generated = await post('/api/pairing/generate', { kind: 'laptop' }, desktopToken);
+      const { code } = (await generated.json()) as { code: string };
+      expect(code).toMatch(/^\d{8}$/);
+      const res = await post('/api/desktops/join', { code });
+      expect(res.status).toBe(200);
+      return (await res.json()) as { token: string; desktopId: string };
+    }
+
+    it('delivers each scan to every laptop on the account', async () => {
+      const { desktop, phone, desktopToken } = await pairedClients();
+      const second = await joinLaptop(desktopToken);
+      const secondClient = await connect(second.token);
+
+      const payload = scan();
+      phone.send(payload);
+      expect((await desktop.nextOfType('qr-image')).scanId).toBe(payload.scanId);
+      expect((await secondClient.nextOfType('qr-image')).scanId).toBe(payload.scanId);
+    });
+
+    it('tells existing laptops when one joins', async () => {
+      const { desktop, desktopToken } = await pairedClients();
+      await joinLaptop(desktopToken);
+      await desktop.nextOfType('laptop-joined');
+    });
+
+    it('keeps phones and laptops from using each other\'s codes', async () => {
+      const desktop = await registerDesktop();
+      const phoneCode = ((await (await post('/api/pairing/generate', {}, desktop.token)).json()) as { code: string }).code;
+      expect((await post('/api/desktops/join', { code: phoneCode })).status).toBe(400);
+      expect((await post('/api/pairing/pair', { code: phoneCode })).status).toBe(200); // not consumed
+
+      const laptopCode = ((await (await post('/api/pairing/generate', { kind: 'laptop' }, desktop.token)).json()) as { code: string }).code;
+      expect((await post('/api/pairing/pair', { code: laptopCode })).status).toBe(400);
+      expect(store.redeemCode(laptopCode, 'Phone')).toBeNull();
+    });
+
+    it('requires a desktop credential to issue a laptop code', async () => {
+      expect((await post('/api/pairing/generate', { kind: 'laptop' })).status).toBe(401);
+    });
+
+    it('refuses to let laptops join a local relay', async () => {
+      const localRelay = createRelay({ store: new PairingStore(), allowDesktopRegistration: false });
+      const localServer = http.createServer(localRelay.app);
+      await new Promise<void>((resolve) => localServer.listen(0, '127.0.0.1', resolve));
+      const { port } = localServer.address() as AddressInfo;
+      const res = await fetch(`http://127.0.0.1:${port}/api/desktops/join`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: '12345678' }),
+      });
+      expect(res.status).toBe(404);
+      await localRelay.hub.close();
+      await new Promise<void>((resolve) => localServer.close(() => resolve()));
     });
   });
 
@@ -431,6 +489,72 @@ describe('relay', () => {
   });
 
   describe('persistence', () => {
+    it('keeps every credential working after a restart on an empty disk', async () => {
+      const secret = 'a'.repeat(32);
+      await stop();
+      await start(undefined, secret);
+      const desktop = await registerDesktop();
+      const phone = await pairPhone(desktop.token);
+
+      await stop();
+      await start(undefined, secret); // a fresh store with no data, like free hosting after a restart
+
+      const desktopClient = await connect(desktop.token);
+      const phoneClient = await connect(phone.token);
+      const payload = scan();
+      phoneClient.send(payload);
+      expect((await desktopClient.nextOfType('qr-image')).scanId).toBe(payload.scanId);
+
+      // The phone reappears on the desktop's list, with its name, once it reconnects.
+      expect(relay.hub.listPhones(desktop.desktopId)).toMatchObject([{ id: phone.phoneId, name: 'Test phone', online: true }]);
+    });
+
+    it('refuses credentials signed with another secret, and tampered ones', async () => {
+      const issuer = new PairingStore(undefined, 'a'.repeat(32));
+      const { token, desktopId } = issuer.registerDesktop();
+      expect(new PairingStore(undefined, 'b'.repeat(32)).authenticate(token)).toBeNull();
+      expect(issuer.authenticate(token)).toEqual({ role: 'desktop', desktopId });
+
+      const [, signature] = token.split('.');
+      const forged = Buffer.from(JSON.stringify({ r: 'd', d: 'someone-else' })).toString('base64url');
+      expect(issuer.authenticate(`${forged}.${signature}`)).toBeNull();
+      expect(issuer.authenticate(token.slice(0, -2))).toBeNull();
+      expect(issuer.authenticate('not-a-token')).toBeNull();
+    });
+
+    it('keeps a removed phone out after a restart once its laptop reconnects', async () => {
+      const secret = 'a'.repeat(32);
+      await stop();
+      await start(undefined, secret);
+      const desktop = await registerDesktop();
+      const phone = await pairPhone(desktop.token);
+
+      await stop();
+      await start(undefined, secret);
+
+      const desktopClient = await connect(desktop.token);
+      desktopClient.send({ type: 'revoke-phones', phoneIds: [phone.phoneId] });
+      await desktopClient.nextOfType('connection-status');
+
+      const retry = await connect();
+      retry.send({ type: 'auth', token: phone.token });
+      expect((await retry.nextOfType('auth-result')).success).toBe(false);
+    });
+
+    it('ignores revoke-phones from a phone, and limits it to the sending account', async () => {
+      const first = await pairedClients();
+      first.phone.send({ type: 'revoke-phones', phoneIds: [first.phoneId] });
+      first.phone.send({ type: 'ping' });
+      await first.phone.nextOfType('pong');
+      expect(store.authenticate(first.phoneToken)).not.toBeNull();
+
+      const stranger = await pairedClients();
+      stranger.desktop.send({ type: 'revoke-phones', phoneIds: [first.phoneId] });
+      stranger.desktop.send({ type: 'ping' });
+      await stranger.desktop.nextOfType('pong');
+      expect(store.authenticate(first.phoneToken)).not.toBeNull();
+    });
+
     it('keeps pairings across a restart and never stores raw tokens', async () => {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qr2win-'));
       const dataFile = path.join(dir, 'nested', 'pairings.json');

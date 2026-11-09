@@ -165,7 +165,8 @@ export class LocalChannel {
   }
 
   unpair(phoneId: string): void {
-    if (!this.hub?.revokePhone(phoneId)) throw new Error('That phone is no longer paired.');
+    if (!this.hub) throw new Error('The Wi-Fi server is not running.');
+    this.hub.revokePhone(this.desktopId, phoneId);
   }
 
   private addresses(): string[] {

@@ -3,6 +3,7 @@
 
 // ─── Limits ────────────────────────────────────────────────────────────
 export const PAIRING_CODE_LENGTH = 6;
+export const LAPTOP_CODE_LENGTH = 8;
 export const PAIRING_CODE_EXPIRY_MS = 5 * 60 * 1000;
 export const MAX_IMAGE_PAYLOAD_BYTES = 5 * 1024 * 1024; // decoded image bytes
 export const MAX_IMAGE_BASE64_LENGTH = Math.ceil(MAX_IMAGE_PAYLOAD_BYTES / 3) * 4;
@@ -12,6 +13,7 @@ export const MAX_WS_MESSAGE_BYTES = MAX_IMAGE_BASE64_LENGTH + MAX_DECODED_TEXT_L
 export const MAX_IMAGE_DIMENSION = 4096;
 export const MAX_DEVICE_NAME_LENGTH = 64;
 export const MAX_PHONES_PER_DESKTOP = 20;
+export const MAX_REVOKE_BATCH = 200;
 export const ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const;
 export const RATE_LIMIT_SCANS_PER_MINUTE = 30;
 export const AUTH_TIMEOUT_MS = 10_000;
@@ -25,6 +27,8 @@ export type ImageMimeType = (typeof ALLOWED_MIME_TYPES)[number];
 export type ClientRole = 'phone' | 'desktop';
 
 // ─── REST bodies ───────────────────────────────────────────────────────
+export type PairingCodeKind = 'phone' | 'laptop';
+
 export interface PairingCode {
   code: string;
   expiresAt: number; // unix ms
@@ -72,11 +76,17 @@ export interface QrAck {
   scanId: string;
 }
 
+/** Desktop → relay: phones removed on this laptop. A relay restarted on an empty disk relearns them here. */
+export interface RevokePhones {
+  type: 'revoke-phones';
+  phoneIds: string[];
+}
+
 export interface PingMessage {
   type: 'ping';
 }
 
-export type ClientMessage = AuthMessage | QrImagePayload | QrAck | PingMessage;
+export type ClientMessage = AuthMessage | QrImagePayload | QrAck | RevokePhones | PingMessage;
 
 // ─── Relay → client ────────────────────────────────────────────────────
 export interface AuthResult {
@@ -97,6 +107,11 @@ export interface ConnectionStatus {
 export interface PhonePaired {
   type: 'phone-paired';
   phone: PhoneSummary;
+}
+
+/** Sent to desktops when another laptop joins their account. */
+export interface LaptopJoined {
+  type: 'laptop-joined';
 }
 
 /** The scan was not forwarded because the desktop is offline; the phone keeps it and retries. */
@@ -129,6 +144,7 @@ export type ServerMessage =
   | AuthResult
   | ConnectionStatus
   | PhonePaired
+  | LaptopJoined
   | ScanDeferred
   | QrImagePayload
   | QrAck

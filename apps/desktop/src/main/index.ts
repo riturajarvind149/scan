@@ -153,6 +153,13 @@ function setupIpc(): void {
     return { ...pairing, qrDataUrl, mode };
   });
 
+  handle('create-laptop-code', () => internet.createLaptopCode());
+
+  handle('join-account', async (code: string) => {
+    if (typeof code !== 'string' || !/^\d{8}$/.test(code.trim())) throw new Error('Enter the 8-digit code from your other laptop.');
+    await internet.joinAccount(code.trim());
+  });
+
   handle('unpair-phone', async (mode: ChannelMode, phoneId: string) => {
     assertMode(mode);
     if (typeof phoneId !== 'string') throw new Error('Invalid phone');
@@ -218,14 +225,28 @@ function registerToastShortcut(): void {
   }
 }
 
+function onLaptopJoined(): void {
+  if (!Notification.isSupported()) return;
+  new Notification({
+    title: 'New laptop added',
+    body: "Another laptop now receives your scans too. If this wasn't you, change your relay's RELAY_SECRET.",
+    icon: assetPath('icon.ico'),
+  }).show();
+}
+
 function start(): void {
   registerToastShortcut();
   settings = new SettingsStore();
+  // A daily-use receiver should already be running. On by default once; the checkbox can turn it off.
+  if (app.isPackaged && !userDataOverride && settings.claimAutoStartInitialization()) {
+    app.setLoginItemSettings({ ...loginItemOptions(), openAtLogin: true });
+  }
   presenter = new ScanPresenter(assetPath, assetPath('icon.ico'), broadcastState, showMainWindow);
   Notification.handleActivation((details) => presenter.handleToastActivation(details.arguments));
   const events: ChannelEvents = {
     onScan: (scan, ack) => presenter.receive(scan, ack),
     onPhonePaired,
+    onLaptopJoined,
     onChange: broadcastState,
   };
   local = new LocalChannel(settings, events);

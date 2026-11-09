@@ -51,6 +51,25 @@
     <p class="hint" id="noScans">Scans appear here and as Windows notifications.</p>
   </section>
 
+  <section id="laptopsSection">
+    <h2>Your other laptops</h2>
+    <p class="hint">Every laptop on your account receives each scan. Add each one once, using the internet relay.</p>
+    <button type="button" id="showLaptopCode">Show code for another laptop</button>
+    <div id="laptopCodeBox" hidden>
+      <p class="code" id="laptopCode"></p>
+      <p class="hint center">Type this into the app on your other laptop. It works once and expires in 5 minutes.</p>
+    </div>
+    <div class="field" id="joinRow">
+      <label for="joinCode">Or join another laptop's account</label>
+      <div class="inline">
+        <input type="text" id="joinCode" inputmode="numeric" maxlength="8" placeholder="8-digit code" autocomplete="off" />
+        <button type="button" id="joinAccount">Join</button>
+      </div>
+    </div>
+    <p class="error" id="laptopError" role="alert" hidden></p>
+    <p class="success" id="laptopSuccess" role="status" hidden></p>
+  </section>
+
   <section>
     <h2>Settings</h2>
     <label class="check"><input type="checkbox" id="localEnabled" /> Receive over Wi-Fi</label>

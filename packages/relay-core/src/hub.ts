@@ -2,6 +2,7 @@ import type http from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   AUTH_TIMEOUT_MS,
+  MAX_REVOKE_BATCH,
   MAX_WS_MESSAGE_BYTES,
   RATE_LIMIT_SCANS_PER_MINUTE,
   WS_CLOSE_AUTH_TIMEOUT,
@@ -84,17 +85,20 @@ export class Hub {
     this.broadcastStatus(phone.desktopId);
   }
 
+  /** Tells a desktop's laptops that another one joined, so an unexpected laptop gets noticed. */
+  notifyLaptopJoined(desktopId: string): void {
+    for (const peer of this.desktopPeers(desktopId)) peer.send({ type: 'laptop-joined' });
+  }
+
   /** Revokes a phone: its credential stops working and any live connection is dropped. */
-  revokePhone(phoneId: string): boolean {
-    const phone = this.store.getPhone(phoneId);
-    if (!phone || !this.store.removePhone(phoneId)) return false;
+  revokePhone(desktopId: string, phoneId: string): void {
+    this.store.revokePhone(desktopId, phoneId);
     for (const peer of [...this.peers]) {
-      if (peer.identity.role === 'phone' && peer.identity.phoneId === phoneId) {
+      if (peer.identity.role === 'phone' && peer.identity.desktopId === desktopId && peer.identity.phoneId === phoneId) {
         peer.close(WS_CLOSE_UNAUTHORIZED, 'Pairing revoked');
       }
     }
-    this.broadcastStatus(phone.desktopId);
-    return true;
+    this.broadcastStatus(desktopId);
   }
 
   listPhones(desktopId: string): PhoneSummary[] {
@@ -192,6 +196,9 @@ export class Hub {
       case 'qr-ack':
         this.handleAck(peer, message.scanId);
         return;
+      case 'revoke-phones':
+        this.handleRevocations(peer, message.phoneIds);
+        return;
       default:
         this.sendError(peer, 'Unknown message type', 'UNKNOWN_TYPE');
     }
@@ -229,6 +236,13 @@ export class Hub {
     this.pruneScans();
     this.scans.set(key, { at: Date.now(), acked: false, phoneId: identity.phoneId });
     for (const desktop of desktops) desktop.send(scan);
+  }
+
+  private handleRevocations(peer: Peer, phoneIds: unknown): void {
+    if (peer.identity.role !== 'desktop' || !Array.isArray(phoneIds)) return;
+    for (const phoneId of phoneIds.slice(0, MAX_REVOKE_BATCH)) {
+      if (typeof phoneId === 'string') this.revokePhone(peer.identity.desktopId, phoneId);
+    }
   }
 
   private handleAck(peer: Peer, scanId: unknown): void {

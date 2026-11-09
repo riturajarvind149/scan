@@ -5,6 +5,7 @@ export type ChannelMode = 'local' | 'internet';
 export interface ChannelEvents {
   onScan(scan: QrImagePayload, ack: () => void): void;
   onPhonePaired(phone: PhoneSummary, mode: ChannelMode): void;
+  onLaptopJoined(): void;
   onChange(): void;
 }
 
@@ -25,6 +26,9 @@ export function handleServerMessage(
       break;
     case 'phone-paired':
       events.onPhonePaired(message.phone, mode);
+      break;
+    case 'laptop-joined':
+      events.onLaptopJoined();
       break;
     case 'qr-image':
       events.onScan(message, () => send({ type: 'qr-ack', scanId: message.scanId }));

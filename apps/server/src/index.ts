@@ -14,7 +14,17 @@ const WEB_ROOT = process.env.WEB_ROOT ?? path.resolve(here, '..', '..', 'web', '
 const TRUST_PROXY = Number.parseInt(process.env.TRUST_PROXY ?? '0', 10);
 const CORS_ORIGINS = (process.env.CORS_ORIGINS ?? '').split(',').map((origin) => origin.trim()).filter(Boolean);
 
-const store = new PairingStore(path.join(DATA_DIR, 'pairings.json'));
+const RELAY_SECRET = process.env.RELAY_SECRET;
+
+if (RELAY_SECRET && RELAY_SECRET.length < 32) {
+  console.error('[server] RELAY_SECRET must be at least 32 characters.');
+  process.exit(1);
+}
+if (!RELAY_SECRET) {
+  console.warn(`[server] RELAY_SECRET is not set; using one kept in ${DATA_DIR}. If that folder is lost, every device must pair again.`);
+}
+
+const store = new PairingStore(path.join(DATA_DIR, 'pairings.json'), RELAY_SECRET);
 const { app, hub } = createRelay({ store, webRoot: WEB_ROOT, corsOrigins: CORS_ORIGINS, trustProxy: TRUST_PROXY });
 const server = http.createServer(app);
 hub.attach(server);
