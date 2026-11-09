@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent } from 'react';
-import { MAX_DECODED_TEXT_LENGTH, type QrImagePayload } from '@qr2win/shared-types';
+import { MAX_DECODED_TEXT_LENGTH } from '@qr2win/shared-types';
 import { useQrCamera } from '../hooks/useQrCamera';
-import { copyRegion, cropRegion, encodeCanvas, encodeRawImage, readPixels } from '../lib/capture';
+import { copyRegion, cropRegion, encodeQuickly, encodeRawImage, readPixels } from '../lib/capture';
 import { sharpnessScore, type Detection } from '../lib/enhance';
 import { type Pairing, WS_URL } from '../lib/pairing';
 import { PhoneClient, type ClientState, type ScanEntry } from '../lib/phone-client';
-import type { ScannerClient } from '../lib/scanner-client';
+import { ScannerClient } from '../lib/scanner-client';
 
 /** A code still in view is not a new scan; it counts again only after this long out of view. */
 const SAME_CODE_COOLDOWN_MS = 3000;
-/** How long to keep looking for a sharper frame of a newly seen code before sending it. */
+/** How long after sending to keep looking for a sharper frame to enhance. Nothing waits on this. */
 const BEST_FRAME_WINDOW_MS = 350;
 const VISIBLE_RESULTS = 2;
 
@@ -21,11 +21,12 @@ interface ScannerScreenProps {
   onRevoked?: () => void;
 }
 
+/** A scan already sent, whose best frame is being collected for the clearer copy. */
 interface PendingCapture {
+  scanId: string;
   crop: HTMLCanvasElement;
   score: number;
   text: string;
-  timestamp: number;
 }
 
 function newScanId(): string {
@@ -52,37 +53,6 @@ function scanLabel(scan: ScanEntry): string {
   }
 }
 
-/** Sends the untouched capture, plus an enhanced copy if it passes verification. */
-async function buildPayload(capture: PendingCapture, scanner: ScannerClient): Promise<QrImagePayload | null> {
-  const original = encodeCanvas(capture.crop);
-  if (!original) return null;
-  const payload: QrImagePayload = {
-    type: 'qr-image',
-    scanId: newScanId(),
-    timestamp: capture.timestamp,
-    mimeType: original.mimeType,
-    width: original.width,
-    height: original.height,
-    imageBase64: original.base64,
-    decodedText: capture.text.slice(0, MAX_DECODED_TEXT_LENGTH),
-  };
-  try {
-    const result = await scanner.enhance(readPixels(capture.crop), capture.text);
-    const encoded = result && encodeRawImage(result.image);
-    if (result && encoded) {
-      payload.enhanced = {
-        mimeType: encoded.mimeType,
-        width: encoded.width,
-        height: encoded.height,
-        imageBase64: encoded.base64,
-        method: result.method,
-      };
-    }
-  } catch (err) {
-    console.warn('[scanner] Enhancement skipped:', (err as Error).message);
-  }
-  return payload;
-}
 
 export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerScreenProps) {
   const client = useMemo(() => new PhoneClient(WS_URL, pairing?.token ?? null), [pairing?.token]);
@@ -91,6 +61,7 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
   const videoRef = useRef<HTMLVideoElement>(null);
   const lastSeen = useRef(new Map<string, number>());
   const pending = useRef(new Map<string, PendingCapture>());
+  const enhancer = useRef<ScannerClient | null>(null);
   const pinch = useRef<{ pointers: Map<number, { x: number; y: number }>; distance: number; zoom: number }>({
     pointers: new Map(),
     distance: 0,
@@ -106,20 +77,41 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
     if (state.revoked) onRevoked?.();
   }, [state.revoked, onRevoked]);
 
-  const finishCapture = useCallback(
-    (text: string, scanner: ScannerClient) => {
+  useEffect(
+    () => () => {
+      enhancer.current?.terminate();
+      enhancer.current = null;
+    },
+    [],
+  );
+
+  /** Makes the clearer copy on its own worker, so detection never pauses for it. */
+  const enhanceInBackground = useCallback(
+    (text: string) => {
       const capture = pending.current.get(text);
       if (!capture) return;
       pending.current.delete(text);
-      void buildPayload(capture, scanner).then((payload) => {
-        if (payload) client.sendScan(payload);
-      });
+      enhancer.current ??= new ScannerClient();
+      void enhancer.current
+        .enhance(readPixels(capture.crop), capture.text)
+        .then((result) => {
+          const encoded = result && encodeRawImage(result.image);
+          if (!result || !encoded) return;
+          client.addEnhancement(capture.scanId, {
+            mimeType: encoded.mimeType,
+            width: encoded.width,
+            height: encoded.height,
+            imageBase64: encoded.base64,
+            method: result.method,
+          });
+        })
+        .catch((err: Error) => console.warn('[scanner] Enhancement skipped:', err.message));
     },
     [client],
   );
 
   const onDetections = useCallback(
-    (detections: Detection[], frame: HTMLCanvasElement, scanner: ScannerClient) => {
+    (detections: Detection[], frame: HTMLCanvasElement) => {
       const now = Date.now();
       for (const { text, corners } of detections) {
         const previous = lastSeen.current.get(text);
@@ -128,27 +120,41 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
         const waiting = pending.current.get(text);
         if (stillInView && !waiting) continue;
 
-        // Keep the sharpest view of this code from the next few frames, for slower or shaky cameras.
         const region = cropRegion(corners, frame.width, frame.height);
         if (region.width < 1 || region.height < 1) continue;
         const crop = copyRegion(frame, region);
         const score = sharpnessScore(readPixels(crop));
         if (waiting) {
+          // Already sent. Keep the sharpest view from the next few frames for the clearer copy.
           if (score > waiting.score) {
             waiting.crop = crop;
             waiting.score = score;
           }
           continue;
         }
+
+        const photo = encodeQuickly(crop);
+        if (!photo) continue;
+        const scanId = newScanId();
         navigator.vibrate?.(40);
-        pending.current.set(text, { crop, score, text, timestamp: now });
-        setTimeout(() => finishCapture(text, scanner), BEST_FRAME_WINDOW_MS);
+        client.sendScan({
+          type: 'qr-image',
+          scanId,
+          timestamp: now,
+          mimeType: photo.mimeType,
+          width: photo.width,
+          height: photo.height,
+          imageBase64: photo.base64,
+          decodedText: text.slice(0, MAX_DECODED_TEXT_LENGTH),
+        });
+        pending.current.set(text, { scanId, crop, score, text });
+        setTimeout(() => enhanceInBackground(text), BEST_FRAME_WINDOW_MS);
       }
       for (const [text, seenAt] of lastSeen.current) {
         if (now - seenAt > SAME_CODE_COOLDOWN_MS * 2) lastSeen.current.delete(text);
       }
     },
-    [finishCapture],
+    [client, enhanceInBackground],
   );
 
   const camera = useQrCamera(videoRef, cameraOn, onDetections);

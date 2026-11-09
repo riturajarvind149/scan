@@ -125,7 +125,7 @@ function nextPass(index: number, frame: HTMLCanvasElement, zoom: number): { regi
 export function useQrCamera(
   videoRef: RefObject<HTMLVideoElement>,
   active: boolean,
-  onDetections: (detections: Detection[], frame: HTMLCanvasElement, scanner: ScannerClient) => void,
+  onDetections: (detections: Detection[], frame: HTMLCanvasElement) => void,
 ): CameraState {
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -267,34 +267,33 @@ export function useQrCamera(
           applyBrightness(Math.max(bright.min, bright.value - bright.step * 2));
         }
 
+        // Both run at once, and whichever answers first sends the scan. The frame stays put until both finish.
         const found = new Map<string, Detection>();
-        try {
-          const fromWorker = await scanner.detect(pixels, thorough, stretch);
-          for (const detection of fromWorker) {
-            found.set(detection.text, {
-              ...detection,
-              corners: detection.corners.map((point) => ({ x: region.x + point.x / detectScale, y: region.y + point.y / detectScale })),
-            });
-          }
-        } catch (err) {
-          console.warn('[scanner] Detection failed:', (err as Error).message);
-        }
-        if (native && !disposed) {
-          try {
-            for (const code of await native.detect(frame)) {
-              if (code.rawValue && !found.has(code.rawValue)) {
-                found.set(code.rawValue, { text: code.rawValue, corners: code.cornerPoints, inverted: false });
-              }
-            }
-          } catch {
-            // The phone's own detector is only a bonus.
-          }
-        }
+        const report = (detections: Detection[]) => {
+          if (disposed || detections.length === 0) return;
+          for (const detection of detections) found.set(detection.text, detection);
+          setDetections([...found.values()]);
+          callback.current(detections, frame);
+        };
+        const fromWorker = scanner.detect(pixels, thorough, stretch).then(
+          (detections) =>
+            report(
+              detections.map((detection) => ({
+                ...detection,
+                corners: detection.corners.map((point) => ({ x: region.x + point.x / detectScale, y: region.y + point.y / detectScale })),
+              })),
+            ),
+          (err: Error) => console.warn('[scanner] Detection failed:', err.message),
+        );
+        const fromPhone = native
+          ? native.detect(frame).then(
+              (codes) => report(codes.filter((code) => code.rawValue).map((code) => ({ text: code.rawValue, corners: code.cornerPoints, inverted: false }))),
+              () => undefined, // the phone's own detector is only a bonus
+            )
+          : Promise.resolve();
+        await Promise.all([fromWorker, fromPhone]);
         if (disposed) return;
-
-        const detections = [...found.values()];
-        setDetections(detections);
-        if (detections.length > 0) callback.current(detections, frame, scanner);
+        if (found.size === 0) setDetections([]);
 
         const elapsed = Date.now() - tickStart;
         if (elapsed < MIN_TICK_MS) await new Promise((resolve) => setTimeout(resolve, MIN_TICK_MS - elapsed));

@@ -1,6 +1,6 @@
 import { BrowserWindow, Notification, screen } from 'electron';
 import path from 'node:path';
-import { validateQrPayload, type QrImagePayload } from '@qr2win/shared-types';
+import { validateEnhancedImage, validateQrPayload, type EnhancedImage, type QrImagePayload } from '@qr2win/shared-types';
 
 const HISTORY_LIMIT = 50;
 const LIVE_TILES = 6;
@@ -60,6 +60,16 @@ export class ScanPresenter {
     else this.notify(scan);
     ack();
     this.onChange();
+  }
+
+  /** Upgrades a scan already on screen with its clearer copy, which arrives just after the scan. */
+  applyEnhancement(scanId: string, enhanced: EnhancedImage): void {
+    const scan = this.history.find((item) => item.scanId === scanId);
+    if (!scan || validateEnhancedImage(enhanced)) return;
+    scan.enhanced = enhanced;
+    const popup = this.popups.get(scanId);
+    if (popup && !popup.isDestroyed()) popup.webContents.send('scan-enhanced', scan);
+    if (this.live && !this.live.isDestroyed()) this.live.webContents.send('live-scan', scan);
   }
 
   /**

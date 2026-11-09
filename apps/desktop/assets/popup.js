@@ -20,8 +20,8 @@ window.popup.getScan().then((scan) => {
   image.src = original;
 
   // The clearer copy is only ever sent if it reads exactly the same as the original.
-  if (scan.enhanced) {
-    const clearer = `data:${scan.enhanced.mimeType};base64,${scan.enhanced.imageBase64}`;
+  const showClearerOption = (enhanced) => {
+    const clearer = `data:${enhanced.mimeType};base64,${enhanced.imageBase64}`;
     const version = document.getElementById('version');
     const note = document.getElementById('versionNote');
     const toggle = document.getElementById('toggleVersion');
@@ -29,7 +29,7 @@ window.popup.getScan().then((scan) => {
     const render = () => {
       image.src = showingClearer ? clearer : original;
       note.textContent = showingClearer ? 'Clearer copy, checked to read the same' : 'Original photo';
-      note.title = showingClearer ? scan.enhanced.method : '';
+      note.title = showingClearer ? enhanced.method : '';
       toggle.textContent = showingClearer ? 'Show original' : 'Show clearer';
     };
     toggle.addEventListener('click', () => {
@@ -38,7 +38,10 @@ window.popup.getScan().then((scan) => {
     });
     version.hidden = false;
     render();
-  }
+  };
+  if (scan.enhanced) showClearerOption(scan.enhanced);
+  // It often arrives just after this window opens.
+  else window.popup.onEnhanced((updated) => showClearerOption(updated.enhanced));
 
   // Scanned content is untrusted: it is shown as plain text and never turned into a link.
   const details = document.getElementById('details');

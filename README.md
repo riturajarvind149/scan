@@ -104,9 +104,9 @@ It runs as a single instance, because live connections are held in that process.
 
 **Delivery.** A scan shows as delivered on the phone only once the laptop confirms it. If the laptop is offline, the phone holds the scan for up to 5 minutes and sends it when the laptop returns. Both sides reconnect by themselves and detect dead connections with heartbeats.
 
-**The image.** The phone copies the code's pixels straight from the sharpest of a few camera frames into a PNG, which is always sent. It is never regenerated from the decoded text.
+**The image.** To reach the laptop as fast as possible, the phone sends a photo of the code the moment it detects one: the code's real pixels from that camera frame, as a high-quality JPEG up to 1000 pixels across. It is never regenerated from the decoded text.
 
-**Enhancement.** The phone also tries to make a clearer copy, by squaring up the code, evening out glare, stretching contrast and sharpening edges. These keep the code's real shades and never force pixels to pure black and white. The copy is used only if two independent decoders, in their normal mode, both read it as exactly the same text as the capture; otherwise only the original is shown. The laptop shows the clearer copy by default, labelled as checked, with a button to see the original.
+**Enhancement.** A moment later, in the background, the phone takes the sharpest of the next few frames and tries to make a clearer copy, by squaring up the code, evening out glare, stretching contrast and sharpening edges. These keep the code's real shades and never force pixels to pure black and white. The copy is used only if two independent decoders, in their normal mode, both read it as exactly the same text as the capture; otherwise only the original is shown. When it arrives, the laptop swaps it in, labelled as checked, with a button to see the original photo.
 
 ## Security
 

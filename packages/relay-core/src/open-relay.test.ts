@@ -222,6 +222,65 @@ describe('open relay', () => {
       expect(await phone.silentFor(100, 'error')).toBe(true);
     });
 
+    describe('a clearer copy following a scan', () => {
+      const enhanced = { mimeType: 'image/png' as const, width: 1, height: 1, imageBase64: TINY_PNG, method: 'squared up' };
+
+      it('reaches every laptop after the scan itself', async () => {
+        const invite = await createInvite(await signIn());
+        const first = await connected((await joinLaptop(invite, 'One')).token);
+        const second = await connected((await joinLaptop(invite, 'Two')).token);
+        const phone = await connected();
+        const payload = scan();
+        phone.send(payload);
+        await first.nextOfType('qr-image');
+        await second.nextOfType('qr-image');
+
+        phone.send({ type: 'qr-enhanced', scanId: payload.scanId, enhanced });
+        expect((await first.nextOfType('qr-enhanced')).scanId).toBe(payload.scanId);
+        expect((await second.nextOfType('qr-enhanced')).enhanced.method).toBe('squared up');
+      });
+
+      it('is ignored for a scan that was never sent', async () => {
+        const laptop = await connected((await joinLaptop(await createInvite(await signIn()))).token);
+        const phone = await connected();
+        phone.send({ type: 'qr-enhanced', scanId: 'never-sent-0001', enhanced });
+        expect(await laptop.silentFor(150, 'qr-enhanced')).toBe(true);
+      });
+
+      it("can't be attached to another phone's scan", async () => {
+        const laptop = await connected((await joinLaptop(await createInvite(await signIn()))).token);
+        const sender = await connected();
+        const attacker = await connected();
+        const payload = scan();
+        sender.send(payload);
+        await laptop.nextOfType('qr-image');
+        attacker.send({ type: 'qr-enhanced', scanId: payload.scanId, enhanced });
+        expect(await laptop.silentFor(150, 'qr-enhanced')).toBe(true);
+      });
+
+      it('is dropped if it is not a real image', async () => {
+        const laptop = await connected((await joinLaptop(await createInvite(await signIn()))).token);
+        const phone = await connected();
+        const payload = scan();
+        phone.send(payload);
+        await laptop.nextOfType('qr-image');
+        phone.send({ type: 'qr-enhanced', scanId: payload.scanId, enhanced: { ...enhanced, imageBase64: 'PGh0bWw+AAAAAAAA' } });
+        expect(await laptop.silentFor(150, 'qr-enhanced')).toBe(true);
+      });
+
+      it('never comes from a laptop', async () => {
+        const invite = await createInvite(await signIn());
+        const first = await connected((await joinLaptop(invite, 'One')).token);
+        const second = await connected((await joinLaptop(invite, 'Two')).token);
+        const phone = await connected();
+        const payload = scan();
+        phone.send(payload);
+        await second.nextOfType('qr-image');
+        first.send({ type: 'qr-enhanced', scanId: payload.scanId, enhanced });
+        expect(await second.silentFor(150, 'qr-enhanced')).toBe(true);
+      });
+    });
+
     it('carries the enhanced copy along with the original', async () => {
       const laptop = await connected((await joinLaptop(await createInvite(await signIn()))).token);
       const phone = await connected();

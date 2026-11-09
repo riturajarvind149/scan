@@ -1,9 +1,10 @@
-import type { ClientMessage, PhoneSummary, QrImagePayload, ServerMessage } from '@qr2win/shared-types';
+import type { ClientMessage, EnhancedImage, PhoneSummary, QrImagePayload, ServerMessage } from '@qr2win/shared-types';
 
 export type ChannelMode = 'local' | 'internet';
 
 export interface ChannelEvents {
   onScan(scan: QrImagePayload, ack: () => void): void;
+  onEnhanced(scanId: string, enhanced: EnhancedImage): void;
   onPhonePaired(phone: PhoneSummary, mode: ChannelMode): void;
   onLaptopJoined(name: string): void;
   onChange(): void;
@@ -32,6 +33,9 @@ export function handleServerMessage(
       break;
     case 'qr-image':
       events.onScan(message, () => send({ type: 'qr-ack', scanId: message.scanId }));
+      break;
+    case 'qr-enhanced':
+      events.onEnhanced(message.scanId, message.enhanced);
       break;
     case 'error':
       console.warn(`[${mode}] Relay error ${message.code}: ${message.message}`);
