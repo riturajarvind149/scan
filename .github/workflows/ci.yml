@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build:server && npm run build:web
+
+  relay-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t qr-to-windows-relay .
+      - name: Start the image and check it answers
+        run: |
+          docker run -d --name relay -p 3001:3001 qr-to-windows-relay
+          for i in $(seq 1 30); do curl -fs http://localhost:3001/health && curl -fs http://localhost:3001/ -o /dev/null && exit 0; sleep 1; done
+          docker logs relay
+          exit 1
+
+  windows-installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run package:desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: apps/desktop/release/*.exe
+          if-no-files-found: error

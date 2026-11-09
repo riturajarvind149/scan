@@ -1,239 +1,117 @@
-# QR-to-Windows-11
+# QR-to-Windows 11
 
-Scan QR codes on your phone and receive them instantly on your Windows 11 desktop.
-
-## Architecture
+Scan any QR code with your phone and see that exact image on your Windows 11 laptop. Point the phone, get a notification, click it, and an always-on-top window shows the code.
 
 ```
-┌─────────────────┐     WebSocket      ┌──────────────┐     WebSocket      ┌───────────────────┐
-│  Phone Browser  │◄──────────────────►│  Express     │◄──────────────────►│  Electron Desktop │
-│  (React + Vite) │    (Internet)      │  Server      │    (Internet)      │  App (Win 11)     │
-│  apps/web       │                    │  apps/server  │                    │  apps/desktop     │
-└────────┬────────┘                    └──────────────┘                    └────────┬──────────┘
-         │                                                                          │
-         │              Direct WebSocket (Local Wi-Fi)                              │
-         └──────────────────────────────────────────────────────────────────────────┘
+ Phone browser                                       Windows 11 app
+ (camera + scanner)                                  (toast → popup)
+       │                                                    ▲
+       │  Same Wi-Fi: HTTPS/WSS straight to the laptop      │
+       ├────────────────────────────────────────────────────┤
+       │  Anywhere: HTTPS/WSS through your relay server     │
+       └───────────────► relay server ──────────────────────┘
 ```
 
-- **`apps/web`** – React + Vite QR scanner website (opened on phone)
-- **`apps/server`** – Node.js Express + WebSocket relay server (Internet mode)
-- **`apps/desktop`** – Electron desktop app for Windows 11 (receives QR images)
-- **`packages/shared-types`** – Shared TypeScript types and constants
+The phone needs no app, only a browser. The laptop needs the desktop app. Same-Wi-Fi mode needs no account and no server; internet mode needs a relay you deploy once.
 
-## Prerequisites
+## Use it
 
-- **Node.js** ≥ 18 (tested with v20)
-- **npm** ≥ 9
-- **Windows 11** (for the desktop app)
-- A phone with a modern browser (Chrome, Safari, Firefox)
+1. Install and open the desktop app. It waits in the system tray and starts receiving over Wi-Fi by itself.
+2. Choose **Show pairing code** and scan the QR with your phone's normal camera. The scanner opens in your browser and pairs without any typing.
+3. Point the phone at any QR code. A Windows notification appears; click it to see the code in a floating window that stays on top until you close it.
 
-## Quick Start
+The phone stays paired. Next time, just reopen the page.
 
-### 1. Install dependencies
+**First time on Wi-Fi:** the phone warns that the connection isn't private, because your laptop isn't a public website with a purchased certificate. Choose **Advanced**, then **Proceed**. Traffic is still encrypted. Windows also asks whether to allow the app through the firewall; allow it for the type of network you're on.
+
+**If the phone can't reach the laptop:** campus, office and hotel Wi-Fi often block devices from talking to each other, and no app can get around that. Use internet mode there.
+
+## Run from source
+
+Requires Node.js 20.19 or newer, on Windows for the desktop app.
 
 ```bash
 npm install
 ```
 
-### 2. Start the relay server (Internet mode)
-
-```bash
-npm run dev:server
-# Starts on http://localhost:3001
-```
-
-### 3. Start the web app
-
-```bash
-npm run dev:web
-# Starts on http://localhost:5173 (accessible from LAN)
-```
-
-### 4. Start the desktop app
-
 ```bash
 npm run dev:desktop
-# Opens the Electron window
 ```
 
-## How to Pair
+That builds everything and opens the app. Windows only delivers notification clicks to an installed app, so use the [installer](#build-the-installer) to try that step.
 
-### Internet Mode
+| Command | What it does |
+| --- | --- |
+| `npm test` | Unit and integration tests; nothing needs building first |
+| `npm run typecheck` | Type-checks every workspace |
+| `npm run test:e2e` | Full run against the real app and Edge with a simulated camera (Windows; shows real toasts) |
+| `npm run dev:server` | Relay on port 3001, serving the phone app if it has been built with `npm run build:web` |
+| `npm run dev:web` | Phone app with hot reload at `localhost:5173`, proxying to the local relay |
 
-1. Open the **desktop app** and note the server URL (default: `http://localhost:3001`)
-2. Click **"Generate Pairing Code"** — a 6-digit code appears
-3. On your **phone**, open the web app URL
-4. Enter the server URL and 6-digit code
-5. Tap **"Pair with Desktop"**
-6. Start scanning QR codes!
+To work on the phone app using a real phone, build it and use the laptop's Wi-Fi server. A plain `http://192.168.x.x` page can't use the camera in any browser.
 
-### Local Wi-Fi Mode
-
-1. In the desktop app, click **"Start Local Server"**
-2. Note the displayed IP addresses (e.g., `192.168.1.100:3002`) and pairing code
-3. On your phone, enter the local address as the server URL
-4. Enter the pairing code and pair
-5. Both devices must be on the **same Wi-Fi network**
-
-## Testing Local Wi-Fi Mode
-
-1. Connect both your phone and laptop to the same Wi-Fi network
-2. Start the local server in the desktop app
-3. On your phone, use the IP address shown (NOT `localhost`)
-4. If connection fails, check Windows Firewall (see troubleshooting below)
-
-## Deploying the Backend (Internet Mode)
-
-To use Internet mode across different networks:
-
-1. Deploy `apps/server` to a cloud provider (Railway, Render, Fly.io, etc.)
-2. Set environment variables:
-   ```
-   PORT=3001
-   CORS_ORIGIN=https://your-web-app.com
-   ```
-3. Build: `npm run build:server`
-4. Start: `node apps/server/dist/index.js`
-5. Update the desktop app's server URL and the phone's server URL to point to the deployed backend
-6. For production, use `wss://` (WebSocket Secure) via your hosting provider's TLS termination
-
-> **Important**: Internet mode requires a deployed, reachable backend server. The app does not pretend to work over the internet without one. The default `localhost:3001` only works when both devices can reach that address.
-
-## Building the Desktop App
+## Build the installer
 
 ```bash
-# Build TypeScript
-npm run build:desktop
-
-# Package for Windows
-cd apps/desktop
-npm run package
-# Output in apps/desktop/release/
+npm run package:desktop
 ```
 
-## Running Tests
+The installer lands in `apps/desktop/release/`. It isn't code-signed, so Windows SmartScreen warns on first run until you add a certificate. The CI workflow also builds it on every push.
+
+## Deploy the internet relay
+
+The relay is one service that also hosts the phone app, so there's nothing else to deploy.
+
+**Render:** create a Blueprint from this repository; `render.yaml` configures it. **Anywhere else:** run the `Dockerfile` behind an HTTPS proxy, which most hosts provide automatically.
 
 ```bash
-npm test
+docker build -t qr-to-windows-relay .
 ```
-
-Tests cover:
-- Pairing code generation and validation
-- Token management and revocation
-- Rate limiting
-- WebSocket authentication and rejection
-- QR image delivery and routing
-- Duplicate scan deduplication
-- Payload validation (size, MIME type, dimensions)
-- Cross-device routing isolation
-- Desktop offline notification
-- Error paths
-
-## Type Checking
 
 ```bash
-npm run typecheck
+docker run -p 3001:3001 -v qr-relay-data:/data -e TRUST_PROXY=1 qr-to-windows-relay
 ```
 
-## Windows Firewall Troubleshooting
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `3001` | Port to listen on |
+| `DATA_DIR` | `apps/server/data`, `/data` in Docker | Where pairings are saved; use a persistent volume |
+| `TRUST_PROXY` | `0` | Reverse proxies in front of the server. Set to `1` on hosted platforms, or all visitors share one rate limit |
+| `CORS_ORIGINS` | none | Extra origins allowed to call the API, if you host the phone app elsewhere (build it with `VITE_SERVER_URL`) |
+| `WEB_ROOT` | `apps/web/dist` | Location of the built phone app |
 
-When using Local Wi-Fi Mode, Windows Firewall may block incoming connections.
+Then paste your relay's `https://` address under **Settings** in the desktop app. Check it with `https://your-relay/health`.
 
-### Allow Node.js through firewall:
+It runs as a single instance, because live connections and pairings are held in that process and its data file.
 
-1. Open **Windows Security** → **Firewall & network protection**
-2. Click **"Allow an app through firewall"**
-3. Click **"Change settings"** → **"Allow another app"**
-4. Browse to your Node.js installation (e.g., `C:\Program Files\nodejs\node.exe`)
-5. Check **"Private"** network
-6. Click **OK**
+## How it works
 
-### Or via PowerShell (Admin):
+- **`packages/shared-types`**: the wire protocol, limits, and validation used by every part.
+- **`packages/relay-core`**: pairing, credentials and message routing. Both modes run this same code.
+- **`apps/server`**: relay-core as a hosted service.
+- **`apps/desktop`**: the Electron app, which also runs relay-core itself over HTTPS for same-Wi-Fi mode.
+- **`apps/web`**: the React phone app, served by whichever relay the phone paired with.
 
-```powershell
-New-NetFirewallRule -DisplayName "QR-to-Windows-11 Local" -Direction Inbound -Protocol TCP -LocalPort 3002 -Action Allow -Profile Private
-```
+**Why the laptop serves the phone app.** Browsers only allow the camera on secure pages, and a secure page can't connect to plain `ws://` or `http://` addresses. So same-Wi-Fi mode must be HTTPS end to end, using a certificate the app generates for its own network addresses.
 
-## Camera Permission Troubleshooting
+**Delivery.** A scan shows as delivered on the phone only once the laptop confirms it. If the laptop is offline, the phone holds the scan for up to 5 minutes and sends it when the laptop returns. Both sides reconnect by themselves and detect dead connections with heartbeats.
 
-- **Chrome (Android)**: Settings → Site Settings → Camera → Allow for the web app URL
-- **Safari (iOS)**: Settings → Safari → Camera → Allow
-- The web app **requires HTTPS** in production for camera access. In local development, `localhost` and local IPs work without HTTPS in most browsers
-- When testing over local Wi-Fi, your phone's browser may require you to manually accept the non-HTTPS connection
+**The image.** The phone copies the code's pixels straight from the camera frame into a PNG with a clear margin around it. It is never regenerated from the decoded text.
 
-## Security Considerations
+## Security
 
-- **Context Isolation**: Electron renderer has no direct Node.js access; all IPC goes through a validated preload bridge
-- **Content Security Policy**: Restrictive CSP on desktop HTML pages
-- **Token Security**: Pairing tokens are cryptographically random (64 bytes), never logged, and stored only in `sessionStorage` (phone) or encrypted settings (desktop)
-- **Authentication**: All WebSocket connections require valid token authentication within 10 seconds
-- **Input Validation**: MIME types, image dimensions, and payload sizes are validated server-side
-- **Rate Limiting**: 30 scans per minute per token
-- **No Content Execution**: QR content is displayed as text only — URLs are never opened or executed
-- **Image Safety**: QR images displayed via `data:` URIs with CSP restrictions
-- **Pairing Codes**: 6-digit codes expire after 5 minutes and are single-use
+- **Pairing:** 6-digit codes are single use, expire in 5 minutes, and are rate limited to 10 attempts per minute per IP address. The laptop announces every new phone and can remove any of them, which cuts its connection immediately.
+- **Credentials:** a connection's role comes from its credential and can't be claimed. Tokens are 256-bit random values, and the relay stores only their SHA-256 hashes. The laptop encrypts its relay credential with Windows DPAPI. On the phone the token is in the site's local storage.
+- **Transport:** internet relays must use HTTPS. Plain HTTP is accepted only on this PC or private networks.
+- **Untrusted input:** every scan is validated on the relay and again on the desktop, including checking that the bytes really are the stated image type. Scanned text is shown as plain text and is never opened or turned into a link. Scans are rate limited to 30 per minute per phone.
+- **Desktop app:** pages run sandboxed under a strict content security policy, and the popup has no access to app controls. Same-Wi-Fi mode listens on your network while enabled; turn it off under Settings if you only use the relay.
 
-## Known Limitations
+The relay passes images through without storing them, but the relay operator could read them in transit because they aren't end-to-end encrypted. Run your own relay.
 
-### QR Image Cropping
-Camera-based cropping cannot guarantee pixel-for-pixel identity with the physical QR code. Factors include:
-- Perspective distortion from camera angle
-- Glare and reflections
-- Camera resolution and focus quality
-- The library provides corner points which we use to crop, but the crop is from the camera frame — not a reconstruction
+## Known limitations
 
-### Windows Notifications
-- Notifications may not appear when **Windows Focus Assist / Do Not Disturb** is enabled
-- Full-screen exclusive applications (especially DirectX games) may suppress notification popups
-- The always-on-top popup window works in most cases but may be occluded by other always-on-top windows
-- Some notification settings are controlled at the OS level and cannot be overridden by the app
-
-### Network
-- Local Wi-Fi mode requires both devices on the same network with no AP isolation
-- Some corporate/university networks block device-to-device communication
-- Internet mode requires a deployed backend — `localhost` is not accessible from a phone on a different network
-- WebSocket connections may be interrupted by network changes (handled via auto-reconnect)
-
-### Browser Compatibility
-- Camera access requires a secure context (HTTPS) in production
-- Some older browsers may not support the required camera APIs
-- iOS Safari may have restrictions on background WebSocket connections
-
-## Project Structure
-
-```
-SCANNER/
-├── package.json              # Root workspace config
-├── tsconfig.base.json        # Shared TypeScript config
-├── packages/
-│   └── shared-types/         # Shared types and constants
-│       └── src/index.ts
-├── apps/
-│   ├── server/               # Express + WebSocket relay
-│   │   └── src/
-│   │       ├── index.ts      # Server entry point
-│   │       ├── pairing.ts    # Pairing store
-│   │       ├── ws-handler.ts # WebSocket message handler
-│   │       └── server.test.ts# Comprehensive tests
-│   ├── web/                  # React + Vite phone scanner
-│   │   └── src/
-│   │       ├── App.tsx
-│   │       ├── components/
-│   │       │   ├── QrScanner.tsx
-│   │       │   ├── PairingScreen.tsx
-│   │       │   └── StatusBar.tsx
-│   │       └── hooks/
-│   │           └── useConnection.ts
-│   └── desktop/              # Electron desktop app
-│       ├── src/main/
-│       │   ├── index.ts      # Main process
-│       │   ├── preload.ts    # Secure preload bridge
-│       │   ├── connection.ts # Internet mode WebSocket
-│       │   ├── local-server.ts # Local Wi-Fi server
-│       │   ├── local-pairing.ts # Local pairing store
-│       │   └── settings.ts   # Persistent settings
-│       └── assets/
-│           ├── index.html    # Main window UI
-│           └── popup.html    # QR popup window
-```
-
+- **Notifications:** Do Not Disturb, Focus and full-screen apps can hide toasts, and Windows controls this. Scans still appear under **Recent scans** and in the tray menu's **Show latest QR code**.
+- **Image fidelity:** it's a photo of the code, so glare, angle and focus carry over. The crop is a straight rectangle, not perspective-corrected.
+- **iPhone on same-Wi-Fi:** Safari has historically been strict about secure WebSockets with self-signed certificates. If the page loads but never connects, use internet mode.
+- **Changed networks:** a new Wi-Fi network usually means a new laptop address, and browsers treat that as a different site, so the phone pairs again there.
+- **Background scanning:** browsers pause the camera when the page isn't visible.

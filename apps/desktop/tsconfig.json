@@ -1,14 +1,8 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "outDir": "./dist",
-    "rootDir": "./src",
-    "module": "CommonJS",
-    "moduleResolution": "node",
-    "types": ["node"],
-    "esModuleInterop": true,
-    "resolveJsonModule": true
+    "noEmit": true,
+    "types": ["node"]
   },
-  "include": ["src"]
+  "include": ["src", "build.mjs"]
 }
-

@@ -1,0 +1,16 @@
+# One-click deploy of the internet relay on Render: https://render.com/docs/blueprint-spec
+# Pairings live on the attached disk. Disks need a paid instance; on the free tier, remove `disk` and
+# expect phones to re-pair after each redeploy.
+services:
+  - type: web
+    name: qr-to-windows-relay
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: TRUST_PROXY
+        value: "1"
+    disk:
+      name: pairings
+      mountPath: /data
+      sizeGB: 1

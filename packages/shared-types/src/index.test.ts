@@ -1,0 +1,58 @@
+import { describe, expect, it } from 'vitest';
+import { buildPairingUrl, parsePairingHash, parsePairingUrl, validateQrPayload, type QrImagePayload } from './index.js';
+
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
+const valid: QrImagePayload = {
+  type: 'qr-image',
+  scanId: 'abcd-1234',
+  timestamp: 1,
+  mimeType: 'image/png',
+  width: 10,
+  height: 10,
+  imageBase64: PNG,
+  decodedText: 'hello',
+};
+
+describe('validateQrPayload', () => {
+  it('accepts a good scan', () => {
+    expect(validateQrPayload(valid)).toBeNull();
+  });
+
+  it.each([
+    ['non-object', null],
+    ['bad scan id', { ...valid, scanId: '../../etc' }],
+    ['fractional size', { ...valid, width: 1.5 }],
+    ['huge size', { ...valid, height: 99999 }],
+    ['non-string text', { ...valid, decodedText: 5 }],
+    ['oversized text', { ...valid, decodedText: 'x'.repeat(9000) }],
+    ['bad mime', { ...valid, mimeType: 'text/html' }],
+    ['bad base64', { ...valid, imageBase64: 'not base64!' }],
+    ['mime mismatch', { ...valid, mimeType: 'image/jpeg' }],
+  ])('rejects %s', (_name, payload) => {
+    expect(validateQrPayload(payload)).not.toBeNull();
+  });
+});
+
+describe('pairing links', () => {
+  it('round-trips and tolerates a trailing slash on the base', () => {
+    const url = buildPairingUrl('https://relay.example.com/', '012345');
+    expect(url).toBe('https://relay.example.com/#pair=012345');
+    expect(parsePairingUrl(url)).toEqual({ origin: 'https://relay.example.com', code: '012345' });
+  });
+
+  it('keeps the port of a local address', () => {
+    expect(parsePairingUrl('https://192.168.1.20:3002/#pair=123456')?.origin).toBe('https://192.168.1.20:3002');
+  });
+
+  it.each(['hello', 'javascript:alert(1)//#pair=123456', 'https://x.test/#pair=12345', 'https://x.test/#pair=abcdef', 'https://x.test/'])(
+    'rejects %s',
+    (text) => {
+      expect(parsePairingUrl(text)).toBeNull();
+    },
+  );
+
+  it('parses only an exact hash', () => {
+    expect(parsePairingHash('#pair=123456')).toBe('123456');
+    expect(parsePairingHash('#pair=123456&x=1')).toBeNull();
+  });
+});

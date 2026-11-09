@@ -2,45 +2,53 @@
   "name": "@qr2win/desktop",
   "version": "1.0.0",
   "private": true,
+  "description": "Receive QR codes scanned on your phone on your Windows 11 desktop.",
+  "author": "QR-to-Windows-11",
   "main": "dist/main/index.js",
   "scripts": {
-    "dev": "tsc && electron .",
-    "build": "tsc",
+    "build": "node build.mjs",
+    "dev": "node build.mjs && electron .",
+    "start": "electron .",
     "typecheck": "tsc --noEmit",
-    "package": "tsc && electron-builder --win",
-    "start": "electron ."
-  },
-  "dependencies": {
-    "@qr2win/shared-types": "*",
-    "@types/qrcode": "^1.5.6",
-    "electron-store": "^8.2.0",
-    "qrcode": "^1.5.4",
-    "uuid": "^10.0.0",
-    "ws": "^8.18.0"
+    "package": "node build.mjs && electron-builder --win"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
-    "@types/uuid": "^10.0.0",
+    "@qr2win/relay-core": "*",
+    "@qr2win/shared-types": "*",
+    "@types/node": "^22.0.0",
+    "@types/qrcode": "^1.5.6",
     "@types/ws": "^8.5.12",
-    "electron": "^32.0.0",
-    "electron-builder": "^25.0.0",
-    "typescript": "^5.5.0"
+    "electron": "45.2.3",
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2",
+    "qrcode": "^1.5.4",
+    "selfsigned": "^5.5.0",
+    "typescript": "^5.5.0",
+    "ws": "^8.18.0"
   },
   "build": {
     "appId": "com.qr2win.desktop",
     "productName": "QR-to-Windows-11",
+    "npmRebuild": false,
+    "files": [
+      "dist/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      { "from": "../web/dist", "to": "web" }
+    ],
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico"
     },
     "nsis": {
       "oneClick": false,
-      "allowToDesktop": true
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
     },
-    "files": [
-      "dist/**/*",
-      "assets/**/*"
-    ],
     "directories": {
       "output": "release"
     }

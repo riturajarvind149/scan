@@ -1,50 +1,19 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron';
 
-// Expose a safe, minimal API to the renderer
-contextBridge.exposeInMainWorld('electronAPI', {
-  // Settings
-  getSettings: () => ipcRenderer.invoke('get-settings'),
-  saveSettings: (data: any) => ipcRenderer.invoke('save-settings', data),
-  getStartWithWindows: () => ipcRenderer.invoke('get-start-with-windows'),
+function subscribe(channel: string, callback: (data: unknown) => void): () => void {
+  const listener = (_event: IpcRendererEvent, data: unknown) => callback(data);
+  ipcRenderer.on(channel, listener);
+  return () => ipcRenderer.removeListener(channel, listener);
+}
+
+contextBridge.exposeInMainWorld('app', {
+  getState: () => ipcRenderer.invoke('get-state'),
+  createPairing: (mode: string, address?: string) => ipcRenderer.invoke('create-pairing', mode, address),
+  unpairPhone: (mode: string, phoneId: string) => ipcRenderer.invoke('unpair-phone', mode, phoneId),
+  setServerUrl: (url: string) => ipcRenderer.invoke('set-server-url', url),
+  setLocalEnabled: (enabled: boolean) => ipcRenderer.invoke('set-local-enabled', enabled),
   setStartWithWindows: (enabled: boolean) => ipcRenderer.invoke('set-start-with-windows', enabled),
-
-  // Pairing
-  generatePairingCode: () => ipcRenderer.invoke('generate-pairing-code'),
-
-  // Connection
-  connectServer: (serverUrl: string, token: string) =>
-    ipcRenderer.invoke('connect-server', serverUrl, token),
-  disconnectServer: () => ipcRenderer.invoke('disconnect-server'),
-  getConnectionStatus: () => ipcRenderer.invoke('get-connection-status'),
-
-  // Local server
-  startLocalServer: () => ipcRenderer.invoke('start-local-server'),
-  stopLocalServer: () => ipcRenderer.invoke('stop-local-server'),
-  getLocalServerInfo: () => ipcRenderer.invoke('get-local-server-info'),
-
-  // Token management
-  revokeToken: (token: string) => ipcRenderer.invoke('revoke-token', token),
-
-  // Popup
-  closePopup: () => ipcRenderer.send('close-popup'),
-
-  // Events from main → renderer
-  onQrReceived: (callback: (data: any) => void) => {
-    const handler = (_event: any, data: any) => callback(data);
-    ipcRenderer.on('qr-received', handler);
-    return () => ipcRenderer.removeListener('qr-received', handler);
-  },
-
-  onQrImageData: (callback: (data: any) => void) => {
-    const handler = (_event: any, data: any) => callback(data);
-    ipcRenderer.on('qr-image-data', handler);
-    return () => ipcRenderer.removeListener('qr-image-data', handler);
-  },
-
-  onConnectionStatusChange: (callback: (data: any) => void) => {
-    const handler = (_event: any, data: any) => callback(data);
-    ipcRenderer.on('connection-status-change', handler);
-    return () => ipcRenderer.removeListener('connection-status-change', handler);
-  },
+  openScan: (scanId: string) => ipcRenderer.invoke('open-scan', scanId),
+  onState: (callback: (state: unknown) => void) => subscribe('state-changed', callback),
+  onPhonePaired: (callback: (phone: unknown) => void) => subscribe('phone-paired', callback),
 });
-

@@ -1,93 +1,103 @@
-import crypto from 'node:crypto';
-import path from 'node:path';
 import fs from 'node:fs';
-import { app } from 'electron';
+import path from 'node:path';
+import { app, safeStorage } from 'electron';
 
-interface Settings {
+interface StoredSettings {
   serverUrl: string;
-  token: string;
-  desktopDeviceId: string;
-  startWithWindows: boolean;
-  localServerEnabled: boolean;
+  localEnabled: boolean;
+  localPort: number;
+  /** The relay credential, encrypted with the Windows user's key (DPAPI). */
+  internetCredential: { desktopId: string; encryptedToken: string } | null;
 }
 
-const DEFAULTS: Settings = {
-  serverUrl: 'http://localhost:3001',
-  token: '',
-  desktopDeviceId: '',
-  startWithWindows: false,
-  localServerEnabled: true,
+const DEFAULTS: StoredSettings = {
+  serverUrl: '',
+  localEnabled: true,
+  localPort: 3002,
+  internetCredential: null,
 };
 
+export interface InternetCredential {
+  desktopId: string;
+  token: string;
+}
+
 export class SettingsStore {
-  private data: Settings;
-  private filePath: string;
+  private data: StoredSettings;
+  private readonly filePath = path.join(app.getPath('userData'), 'settings.json');
 
+  /** Must be constructed after the app is ready, when safeStorage becomes usable. */
   constructor() {
-    // Use app.getPath for safe data storage
-    const userDataPath = app.getPath('userData');
-    this.filePath = path.join(userDataPath, 'settings.json');
-
     this.data = { ...DEFAULTS };
-
-    // Load from disk
     try {
-      if (fs.existsSync(this.filePath)) {
-        const raw = fs.readFileSync(this.filePath, 'utf-8');
-        const parsed = JSON.parse(raw);
-        this.data = { ...DEFAULTS, ...parsed };
+      this.data = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(this.filePath, 'utf-8')) };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        console.error('[settings] Could not read settings, using defaults:', (err as Error).message);
       }
-    } catch {
-      // Use defaults
-    }
-
-    // Generate device ID if not set
-    if (!this.data.desktopDeviceId) {
-      this.data.desktopDeviceId = crypto.randomUUID();
-      this.save();
     }
   }
 
-  getAll(): Omit<Settings, 'token'> & { hasToken: boolean } {
-    return {
-      serverUrl: this.data.serverUrl,
-      desktopDeviceId: this.data.desktopDeviceId,
-      startWithWindows: this.data.startWithWindows,
-      localServerEnabled: this.data.localServerEnabled,
-      hasToken: !!this.data.token,
-    };
-  }
-
-  setAll(partial: Partial<Settings>): void {
-    if (partial.serverUrl !== undefined) this.data.serverUrl = partial.serverUrl;
-    if (partial.token !== undefined) this.data.token = partial.token;
-    if (partial.startWithWindows !== undefined) this.data.startWithWindows = partial.startWithWindows;
-    if (partial.localServerEnabled !== undefined) this.data.localServerEnabled = partial.localServerEnabled;
-    this.save();
-  }
-
-  getServerUrl(): string {
+  get serverUrl(): string {
     return this.data.serverUrl;
   }
 
-  getToken(): string {
-    return this.data.token;
+  /** Changing relays discards the credential, which is only valid on the relay that issued it. */
+  set serverUrl(url: string) {
+    if (url === this.data.serverUrl) return;
+    this.data.serverUrl = url;
+    this.data.internetCredential = null;
+    this.save();
   }
 
-  getDesktopDeviceId(): string {
-    return this.data.desktopDeviceId;
+  get localEnabled(): boolean {
+    return this.data.localEnabled;
+  }
+
+  set localEnabled(enabled: boolean) {
+    this.data.localEnabled = enabled;
+    this.save();
+  }
+
+  get localPort(): number {
+    return this.data.localPort;
+  }
+
+  set localPort(port: number) {
+    this.data.localPort = port;
+    this.save();
+  }
+
+  getCredential(): InternetCredential | null {
+    const stored = this.data.internetCredential;
+    if (!stored) return null;
+    try {
+      return { desktopId: stored.desktopId, token: safeStorage.decryptString(Buffer.from(stored.encryptedToken, 'base64')) };
+    } catch {
+      // Encrypted by another Windows user, or the profile moved: registering again is the recovery.
+      return null;
+    }
+  }
+
+  setCredential(credential: InternetCredential | null): void {
+    if (credential && !safeStorage.isEncryptionAvailable()) {
+      throw new Error('Windows could not provide secure storage for the relay credential.');
+    }
+    this.data.internetCredential = credential && {
+      desktopId: credential.desktopId,
+      encryptedToken: safeStorage.encryptString(credential.token).toString('base64'),
+    };
+    this.save();
   }
 
   private save(): void {
     try {
-      const dir = path.dirname(this.filePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2));
+      fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+      const temp = `${this.filePath}.tmp`;
+      fs.writeFileSync(temp, JSON.stringify(this.data, null, 2));
+      fs.renameSync(temp, this.filePath);
     } catch (err) {
-      console.error('[settings] Failed to save:', err);
+      console.error('[settings] Failed to save:', (err as Error).message);
     }
   }
 }
-

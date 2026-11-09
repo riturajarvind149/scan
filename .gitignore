@@ -8,3 +8,5 @@ release/
 *.log
 .DS_Store
 Thumbs.db
+data/
+e2e/output/

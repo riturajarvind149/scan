@@ -3,348 +3,69 @@
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+        content="default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; base-uri 'none'; form-action 'none'" />
   <title>QR-to-Windows-11</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: 'Segoe UI', Tahoma, sans-serif;
-      background: #0f172a;
-      color: #e2e8f0;
-      padding: 20px;
-      overflow-y: auto;
-    }
-    h1 { font-size: 22px; margin-bottom: 4px; }
-    .subtitle { color: #94a3b8; font-size: 13px; margin-bottom: 20px; }
-    .section { background: #1e293b; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
-    .section h2 { font-size: 15px; margin-bottom: 12px; color: #cbd5e1; }
-    .label { font-size: 12px; color: #94a3b8; margin-bottom: 4px; display: block; }
-    input[type="text"] {
-      width: 100%;
-      padding: 10px 12px;
-      border: 1px solid #334155;
-      border-radius: 8px;
-      background: #0f172a;
-      color: #e2e8f0;
-      font-size: 14px;
-      margin-bottom: 12px;
-      outline: none;
-    }
-    .btn {
-      padding: 10px 18px;
-      border: none;
-      border-radius: 8px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      color: #fff;
-      width: 100%;
-      margin-bottom: 8px;
-      transition: background 0.15s ease;
-    }
-    .btn-primary { background: #2563eb; }
-    .btn-primary:hover { background: #1d4ed8; }
-    .btn-success { background: #16a34a; }
-    .btn-success:hover { background: #15803d; }
-    .btn-danger { background: #dc2626; }
-    .btn-danger:hover { background: #b91c1c; }
-    .btn-secondary { background: #475569; }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .status-dot {
-      display: inline-block;
-      width: 10px; height: 10px;
-      border-radius: 50%;
-      margin-right: 8px;
-    }
-    .status-connected { background: #22c55e; }
-    .status-disconnected { background: #ef4444; }
-    .status-connecting { background: #f59e0b; }
-    .pairing-code {
-      font-size: 36px;
-      font-weight: 700;
-      text-align: center;
-      letter-spacing: 8px;
-      color: #60a5fa;
-      padding: 14px;
-      background: #0f172a;
-      border-radius: 8px;
-      margin: 10px 0;
-      font-family: 'Consolas', 'Courier New', monospace;
-    }
-    .qr-container {
-      text-align: center;
-      margin: 12px 0;
-    }
-    .qr-image {
-      width: 180px;
-      height: 180px;
-      margin: 0 auto;
-      display: block;
-      border-radius: 8px;
-      background: #ffffff;
-      padding: 8px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-    }
-    .info { font-size: 12px; color: #94a3b8; padding: 8px; background: #0f172a; border-radius: 6px; margin-top: 8px; }
-    .scan-log { max-height: 180px; overflow-y: auto; }
-    .scan-item {
-      padding: 8px;
-      border-bottom: 1px solid #334155;
-      font-size: 13px;
-    }
-    .scan-item:last-child { border-bottom: none; }
-    .local-addresses { font-family: monospace; font-size: 13px; color: #60a5fa; margin-top: 4px; }
-    .error { color: #fca5a5; font-size: 13px; margin-top: 6px; }
-  </style>
+  <link rel="stylesheet" href="app.css" />
 </head>
 <body>
-  <h1>📱 QR-to-Windows-11</h1>
-  <p class="subtitle">Receive QR codes scanned on your phone</p>
+  <header class="status-row">
+    <div class="status" id="localStatus"><span class="dot"></span><span>Wi-Fi</span></div>
+    <div class="status" id="internetStatus"><span class="dot"></span><span>Internet</span></div>
+  </header>
 
-  <!-- Connection Status -->
-  <div class="section">
-    <h2>Connection</h2>
-    <div id="connectionStatus">
-      <span class="status-dot status-disconnected"></span>
-      <span>Disconnected</span>
+  <section>
+    <h2>Add a phone</h2>
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" id="tabLocal" aria-selected="true">Same Wi-Fi</button>
+      <button type="button" role="tab" id="tabInternet" aria-selected="false">Over the internet</button>
     </div>
-  </div>
 
-  <!-- Server Settings -->
-  <div class="section">
-    <h2>🌐 Internet Mode</h2>
-    <label class="label">Server URL</label>
-    <input type="text" id="serverUrl" placeholder="http://localhost:3001" />
-    <button class="btn btn-primary" id="btnConnect">Connect to Server</button>
-    <button class="btn btn-secondary" id="btnDisconnect" style="display:none;">Disconnect</button>
-  </div>
-
-  <!-- Pairing -->
-  <div class="section">
-    <h2>🔗 Pairing</h2>
-    <button class="btn btn-success" id="btnGenerateCode">Generate Pairing Code &amp; QR</button>
-    <div id="pairingCodeDisplay" style="display:none;">
-      <div class="pairing-code" id="pairingCode"></div>
-      <div class="qr-container">
-        <img id="pairingQrImg" class="qr-image" style="display:none;" alt="Pairing QR Code" />
-      </div>
-      <div class="info">Scan this QR or enter the 6-digit code on your phone (valid 5 mins)</div>
+    <div id="addressRow" class="field" hidden>
+      <label for="address">Network</label>
+      <select id="address"></select>
     </div>
-    <div id="pairingError" class="error"></div>
-  </div>
 
-  <!-- Local WiFi Mode -->
-  <div class="section">
-    <h2>📶 Local Wi-Fi Mode</h2>
-    <button class="btn btn-primary" id="btnStartLocal">Start Local Server</button>
-    <button class="btn btn-danger" id="btnStopLocal" style="display:none;">Stop Local Server</button>
-    <div id="localInfo" style="display:none;">
-      <div class="info">
-        <p>Phone can connect to:</p>
-        <div id="localAddresses" class="local-addresses"></div>
-        <p style="margin-top: 8px;">Pairing code: <strong id="localPairingCode" style="color: #60a5fa; font-size: 16px;"></strong></p>
-      </div>
-      <div class="qr-container">
-        <img id="localPairingQrImg" class="qr-image" style="display:none;" alt="Local Pairing QR Code" />
-      </div>
-      <div class="info" style="margin-top: 8px;">
-        ⚠️ If the phone cannot connect, verify Windows Firewall allows Node.js / Electron on Private networks.
+    <p class="hint" id="pairHint"></p>
+    <button type="button" class="primary" id="showPairing">Show pairing code</button>
+
+    <div id="pairing" hidden>
+      <img id="pairingQr" alt="Pairing QR code. Scan it with your phone's camera." />
+      <p class="code" id="pairingCode"></p>
+      <p class="hint center">Scan with your phone's camera, or open <strong id="pairingUrl" class="url"></strong> and type the code.</p>
+      <p class="hint center" id="pairingExpiry"></p>
+      <p class="hint" id="certHint" hidden>Your phone will warn that the connection isn't private, because this PC isn't a public website. Choose <strong>Advanced</strong>, then <strong>Proceed</strong>. If the page never loads, allow this app in Windows Firewall (on this network's type: Public or Private). Campus and office Wi-Fi often block devices from reaching each other; on those, use <strong>Over the internet</strong>.</p>
+    </div>
+    <p class="error" id="pairError" role="alert" hidden></p>
+    <p class="success" id="pairSuccess" role="status" hidden></p>
+  </section>
+
+  <section>
+    <h2>Paired phones</h2>
+    <ul class="list" id="phones"></ul>
+    <p class="hint" id="noPhones">No phones yet.</p>
+  </section>
+
+  <section>
+    <h2>Recent scans</h2>
+    <ul class="list" id="scans"></ul>
+    <p class="hint" id="noScans">Scans appear here and as Windows notifications.</p>
+  </section>
+
+  <section>
+    <h2>Settings</h2>
+    <label class="check"><input type="checkbox" id="localEnabled" /> Receive over Wi-Fi</label>
+    <label class="check" id="autoStartRow"><input type="checkbox" id="startWithWindows" /> Start with Windows, in the tray</label>
+    <div class="field">
+      <label for="serverUrl">Internet relay address</label>
+      <div class="inline">
+        <input type="text" id="serverUrl" placeholder="https://your-relay.example.com" spellcheck="false" />
+        <button type="button" id="saveServer">Save</button>
       </div>
     </div>
-    <div id="localError" class="error"></div>
-  </div>
+    <p class="hint" id="serverHint">Needed only when your phone isn't on the same Wi-Fi. See the README to deploy one.</p>
+    <p class="error" id="serverError" role="alert" hidden></p>
+  </section>
 
-  <!-- Settings -->
-  <div class="section">
-    <h2>⚙️ Settings</h2>
-    <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; color: #cbd5e1;">
-      <input type="checkbox" id="chkStartWithWindows" />
-      <span>Start with Windows (launch in system tray on login)</span>
-    </label>
-  </div>
-
-  <!-- Scan Log -->
-  <div class="section">
-    <h2>📋 Recent Scans</h2>
-    <div id="scanLog" class="scan-log">
-      <div class="info">No scans yet. Pair your phone and scan a QR code.</div>
-    </div>
-  </div>
-
-  <script>
-    const api = window.electronAPI;
-
-    // Elements
-    const serverUrlInput = document.getElementById('serverUrl');
-    const btnConnect = document.getElementById('btnConnect');
-    const btnDisconnect = document.getElementById('btnDisconnect');
-    const btnGenerateCode = document.getElementById('btnGenerateCode');
-    const pairingCodeDisplay = document.getElementById('pairingCodeDisplay');
-    const pairingCodeEl = document.getElementById('pairingCode');
-    const pairingQrImg = document.getElementById('pairingQrImg');
-    const pairingError = document.getElementById('pairingError');
-    const connectionStatus = document.getElementById('connectionStatus');
-    const btnStartLocal = document.getElementById('btnStartLocal');
-    const btnStopLocal = document.getElementById('btnStopLocal');
-    const localInfo = document.getElementById('localInfo');
-    const localAddresses = document.getElementById('localAddresses');
-    const localPairingCode = document.getElementById('localPairingCode');
-    const localPairingQrImg = document.getElementById('localPairingQrImg');
-    const localError = document.getElementById('localError');
-    const chkStartWithWindows = document.getElementById('chkStartWithWindows');
-    const scanLog = document.getElementById('scanLog');
-
-    let scans = [];
-
-    // Load settings
-    async function init() {
-      const settings = await api.getSettings();
-      serverUrlInput.value = settings.serverUrl || 'http://localhost:3001';
-
-      if (api.getStartWithWindows) {
-        const isAutoStart = await api.getStartWithWindows();
-        chkStartWithWindows.checked = !!isAutoStart;
-      }
-
-      chkStartWithWindows.addEventListener('change', async () => {
-        if (api.setStartWithWindows) {
-          await api.setStartWithWindows(chkStartWithWindows.checked);
-        }
-      });
-
-      updateConnectionStatus();
-    }
-
-    // Connection
-    btnConnect.addEventListener('click', async () => {
-      const url = serverUrlInput.value.trim();
-      if (!url) return;
-      await api.saveSettings({ serverUrl: url });
-
-      const settings = await api.getSettings();
-      if (!settings.hasToken) {
-        pairingError.textContent = 'Generate a pairing code first, then pair your phone.';
-        return;
-      }
-
-      await api.connectServer(url, '');
-      updateConnectionStatus();
-    });
-
-    btnDisconnect.addEventListener('click', async () => {
-      await api.disconnectServer();
-      updateConnectionStatus();
-    });
-
-    // Pairing
-    btnGenerateCode.addEventListener('click', async () => {
-      pairingError.textContent = '';
-      btnGenerateCode.disabled = true;
-      btnGenerateCode.textContent = '⏳ Generating...';
-
-      const result = await api.generatePairingCode();
-      btnGenerateCode.disabled = false;
-      btnGenerateCode.textContent = 'Generate Pairing Code & QR';
-
-      if (result.error) {
-        pairingError.textContent = result.error;
-        return;
-      }
-
-      pairingCodeEl.textContent = result.code;
-      if (result.qrDataUrl) {
-        pairingQrImg.src = result.qrDataUrl;
-        pairingQrImg.style.display = 'block';
-      } else {
-        pairingQrImg.style.display = 'none';
-      }
-      pairingCodeDisplay.style.display = 'block';
-
-      // Auto-hide after 5 min
-      setTimeout(() => {
-        pairingCodeDisplay.style.display = 'none';
-      }, 5 * 60 * 1000);
-    });
-
-    // Local server
-    btnStartLocal.addEventListener('click', async () => {
-      localError.textContent = '';
-      btnStartLocal.disabled = true;
-      btnStartLocal.textContent = '⏳ Starting...';
-
-      const result = await api.startLocalServer();
-      btnStartLocal.disabled = false;
-      btnStartLocal.textContent = 'Start Local Server';
-
-      if (result.error) {
-        localError.textContent = result.error;
-        return;
-      }
-      btnStartLocal.style.display = 'none';
-      btnStopLocal.style.display = 'block';
-      localInfo.style.display = 'block';
-      localAddresses.innerHTML = result.addresses
-        .map(addr => '<div>' + addr + '</div>')
-        .join('');
-      localPairingCode.textContent = result.pairingCode;
-
-      if (result.qrDataUrl) {
-        localPairingQrImg.src = result.qrDataUrl;
-        localPairingQrImg.style.display = 'block';
-      } else {
-        localPairingQrImg.style.display = 'none';
-      }
-    });
-
-    btnStopLocal.addEventListener('click', async () => {
-      await api.stopLocalServer();
-      btnStartLocal.style.display = 'block';
-      btnStopLocal.style.display = 'none';
-      localInfo.style.display = 'none';
-    });
-
-    // Connection status polling
-    async function updateConnectionStatus() {
-      const status = await api.getConnectionStatus();
-      const dot = connectionStatus.querySelector('.status-dot');
-      const text = connectionStatus.querySelector('span:last-child');
-
-      dot.className = 'status-dot status-' + status.status;
-      text.textContent = status.status.charAt(0).toUpperCase() + status.status.slice(1);
-      if (status.error) text.textContent += ' — ' + status.error;
-
-      btnConnect.style.display = status.status === 'connected' ? 'none' : 'block';
-      btnDisconnect.style.display = status.status === 'connected' ? 'block' : 'none';
-    }
-
-    setInterval(updateConnectionStatus, 3000);
-
-    // QR scan events
-    api.onQrReceived((data) => {
-      scans.unshift(data);
-      if (scans.length > 50) scans = scans.slice(0, 50);
-      renderScans();
-    });
-
-    function renderScans() {
-      if (scans.length === 0) {
-        scanLog.innerHTML = '<div class="info">No scans yet.</div>';
-        return;
-      }
-      scanLog.innerHTML = scans.map(s => {
-        const time = new Date(s.timestamp).toLocaleTimeString();
-        const text = s.decodedText.length > 50 ? s.decodedText.slice(0, 50) + '…' : s.decodedText;
-        return '<div class="scan-item"><strong>' + time + '</strong> — ' + escapeHtml(text) + '</div>';
-      }).join('');
-    }
-
-    function escapeHtml(str) {
-      const div = document.createElement('div');
-      div.textContent = str;
-      return div.innerHTML;
-    }
-
-    init();
-  </script>
+  <script src="app.js"></script>
 </body>
 </html>
