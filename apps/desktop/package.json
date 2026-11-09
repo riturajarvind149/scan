@@ -6,7 +6,7 @@
   "author": "QR-to-Windows-11",
   "main": "dist/main/index.js",
   "qr2win": {
-    "defaultRelayUrl": ""
+    "defaultRelayUrl": "https://scan-52rh.onrender.com"
   },
   "scripts": {
     "build": "node build.mjs",
