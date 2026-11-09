@@ -21,6 +21,11 @@ const WORK = fs.mkdtempSync(path.join(os.tmpdir(), 'qr2win-e2e-'));
 
 const CODE_A = 'https://example.com/first-code';
 const CODE_B = 'WIFI:S:Cafe;T:WPA;P:espresso;;';
+const CODE_LEFT = 'https://example.com/shown-side-by-side/left';
+const CODE_RIGHT = 'https://example.com/shown-side-by-side/right';
+const CODE_FAR = 'https://example.com/small-and-far-away';
+const CODE_PROJECTOR = 'https://example.com/washed-out-projector';
+const ALL_CODES = [CODE_A, CODE_B, CODE_LEFT, CODE_RIGHT, CODE_FAR, CODE_PROJECTOR];
 
 const IPHONE_SIZED = { viewport: { width: 390, height: 780 }, hasTouch: true, isMobile: true };
 
@@ -56,19 +61,19 @@ function freePort() {
   });
 }
 
-function drawCode(frame, text, width, height) {
+function drawCode(frame, text, width, height, { size = Math.min(width, height) * 0.7, centerX = width / 2, centerY = height / 2, ink = 16 } = {}) {
   const { modules } = QRCode.create(text, { errorCorrectionLevel: 'M' });
-  const scale = Math.floor((Math.min(width, height) * 0.7) / modules.size);
-  const left = Math.floor((width - modules.size * scale) / 2);
-  const top = Math.floor((height - modules.size * scale) / 2);
+  const scale = Math.max(1, Math.floor(size / modules.size));
+  const left = Math.floor(centerX - (modules.size * scale) / 2);
+  const top = Math.floor(centerY - (modules.size * scale) / 2);
   for (let y = 0; y < modules.size * scale; y++) {
     for (let x = 0; x < modules.size * scale; x++) {
-      if (modules.get(Math.floor(y / scale), Math.floor(x / scale))) frame[(top + y) * width + left + x] = 16;
+      if (modules.get(Math.floor(y / scale), Math.floor(x / scale))) frame[(top + y) * width + left + x] = ink;
     }
   }
 }
 
-/** Writes a looping camera feed: code A, nothing, code B, nothing. Chromium plays it as a webcam. */
+/** Writes a looping camera feed of codes in increasingly hard conditions. Chromium plays it as a webcam. */
 function writeCameraVideo(file) {
   const [width, height, fps] = [640, 480, 5];
   const out = fs.openSync(file, 'w');
@@ -79,7 +84,17 @@ function writeCameraVideo(file) {
   const withB = Buffer.alloc(width * height, 235);
   drawCode(withA, CODE_A, width, height);
   drawCode(withB, CODE_B, width, height);
-  const script = [[withA, 2], [empty, 4], [withB, 2], [empty, 4]];
+  const sideBySide = Buffer.alloc(width * height, 235);
+  drawCode(sideBySide, CODE_LEFT, width, height, { size: 270, centerX: 165 });
+  drawCode(sideBySide, CODE_RIGHT, width, height, { size: 270, centerX: 475 });
+  // Far away: a code a sixth of the frame, which the old 400-pixel scan could not resolve reliably.
+  const farAway = Buffer.alloc(width * height, 150);
+  for (let y = 180; y < 300; y++) farAway.fill(235, y * width + 260, y * width + 380);
+  drawCode(farAway, CODE_FAR, width, height, { size: 100 });
+  // A projector with strong room light: black ink comes out as a pale grey.
+  const projector = Buffer.alloc(width * height, 245);
+  drawCode(projector, CODE_PROJECTOR, width, height, { ink: 190 });
+  const script = [[withA, 2], [empty, 4], [withB, 2], [empty, 4], [sideBySide, 2], [empty, 4], [farAway, 2], [empty, 4], [projector, 2], [empty, 4]];
   for (const [luma, seconds] of script) {
     for (let i = 0; i < seconds * fps; i++) {
       fs.writeSync(out, 'FRAME\n');
@@ -179,11 +194,19 @@ async function verifyScanCycle(app, page, phone, label, screenshots) {
   ok(`${label}: clicking opens an always-on-top popup showing the image`);
 
   const image = decodeDataUrl(await popup.$eval('#image img', (img) => img.src));
-  assert.ok([CODE_A, CODE_B].includes(image.text), `popup image must decode to a fed code, got ${image.text}`);
-  ok(`${label}: the image is a real capture that still decodes (${image.width}x${image.height}): ${image.text}`);
+  assert.ok(ALL_CODES.includes(image.text), `popup image must decode to a fed code, got ${image.text}`);
+  ok(`${label}: the image shown decodes correctly (${image.width}x${image.height}): ${image.text}`);
 
   const footer = await popup.textContent('#details');
   assert.ok(footer.includes(image.text));
+
+  assert.equal(await popup.isVisible('#version'), true, 'an enhanced copy should have been made of a clean code');
+  await popup.click('#toggleVersion');
+  const original = decodeDataUrl(await popup.$eval('#image img', (img) => img.src));
+  assert.equal(original.text, image.text, 'the original and the clearer copy must read the same');
+  assert.match(await popup.textContent('#versionNote'), /Original/);
+  ok(`${label}: the original photo is one click away and reads the same (${original.width}x${original.height})`);
+  await popup.click('#toggleVersion');
   assert.equal(await popup.$('#details a'), null, 'scanned text must never become a link');
 
   if (screenshots) {
@@ -265,11 +288,15 @@ async function main() {
 
     await verifyScanCycle(electronApp, page, localPhone, 'wifi-first', true);
     const first = await verifyScanCycle(electronApp, page, localPhone, 'wifi-second', false);
-    await until('a different code is scanned next', async () => {
-      const texts = await page.$$eval('#scans .grow', (nodes) => nodes.map((node) => node.textContent));
-      return texts.includes(CODE_A) && texts.includes(CODE_B);
-    }, 40_000);
+    const scanned = async () => page.$$eval('#scans .grow', (nodes) => nodes.map((node) => node.textContent));
+    await until('every code in the feed arrives', async () => {
+      const texts = await scanned();
+      return ALL_CODES.every((code) => texts.includes(code));
+    }, 70_000);
     ok(`consecutive scans of different codes all arrive (last checked: ${first})`);
+    ok('two codes in view at once arrive as two separate scans');
+    ok('a small, far-away code is read');
+    ok('a washed-out projector code is read');
 
     const cameraWidth = await localPhone.$eval('video', (video) => video.videoWidth);
     assert.ok(cameraWidth > 0);
@@ -392,6 +419,27 @@ async function main() {
     const senders = await Promise.all([internetPhone, phoneTwo].map((phone) => phone.textContent('.scan-result strong')));
     assert.ok(senders.every((text) => text.includes('On your laptop')), `both phones must report delivery: ${senders}`);
     ok('scans from two phones reach both laptops');
+
+    // Live view shows codes as they arrive, with no notification to click.
+    const liveOpening = electronApp.waitForEvent('window');
+    await page.check('#liveView');
+    const liveWindow = await liveOpening;
+    await liveWindow.waitForLoadState('domcontentloaded');
+    const liveBefore = await notificationCount(electronApp);
+    const liveAtStart = await liveWindow.$$eval('.tile', (tiles) => tiles.length);
+    await until('live window shows codes', async () => {
+      const texts = await liveWindow.$$eval('.tile .text', (nodes) => nodes.map((node) => node.textContent));
+      return texts.includes(CODE_LEFT) && texts.includes(CODE_RIGHT);
+    }, 70_000);
+    await liveWindow.screenshot({ path: path.join(OUTPUT, 'live-view.png') });
+    const liveTile = decodeDataUrl(await liveWindow.$eval('.tile img', (img) => img.src));
+    assert.ok(ALL_CODES.includes(liveTile.text), 'a live tile must show a readable code');
+    assert.equal(await notificationCount(electronApp), liveBefore, 'live view replaces notifications');
+    assert.equal(await electronApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().find((win) => win.getTitle().startsWith('QR codes, live')).isAlwaysOnTop()), true);
+    ok(`live view shows each code on its own as it arrives, on top, with no notification (started with ${liveAtStart} tiles)`);
+    await page.uncheck('#liveView');
+    await until('live window closed', async () => !electronApp.windows().includes(liveWindow) || liveWindow.isClosed());
+    ok('turning live view off closes it and brings notifications back');
 
     // Pausing stops scans, and resuming restarts them.
     await admin.click('text=Pause scanning');

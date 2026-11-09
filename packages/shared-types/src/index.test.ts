@@ -18,6 +18,10 @@ describe('validateQrPayload', () => {
     expect(validateQrPayload(valid)).toBeNull();
   });
 
+  it('accepts a scan with an enhanced copy', () => {
+    expect(validateQrPayload({ ...valid, enhanced: { mimeType: 'image/png', width: 10, height: 10, imageBase64: PNG, method: 'squared up' } })).toBeNull();
+  });
+
   it.each([
     ['non-object', null],
     ['bad scan id', { ...valid, scanId: '../../etc' }],
@@ -28,6 +32,9 @@ describe('validateQrPayload', () => {
     ['bad mime', { ...valid, mimeType: 'text/html' }],
     ['bad base64', { ...valid, imageBase64: 'not base64!' }],
     ['mime mismatch', { ...valid, mimeType: 'image/jpeg' }],
+    ['non-object enhanced image', { ...valid, enhanced: 'x' }],
+    ['enhanced image without a description', { ...valid, enhanced: { mimeType: 'image/png', width: 1, height: 1, imageBase64: PNG } }],
+    ['enhanced image that is not an image', { ...valid, enhanced: { mimeType: 'image/png', width: 1, height: 1, imageBase64: 'PGh0bWw+AAAAAAAA', method: 'x' } }],
   ])('rejects %s', (_name, payload) => {
     expect(validateQrPayload(payload)).not.toBeNull();
   });

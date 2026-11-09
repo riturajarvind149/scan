@@ -1,0 +1,71 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  font: 13px 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+  color: #1c2024;
+  background: #fff;
+  overflow: hidden;
+}
+
+/* One code fills the window; several share it evenly. */
+#tiles {
+  display: grid;
+  gap: 8px;
+  height: 100%;
+  padding: 8px;
+  grid-auto-rows: minmax(0, 1fr);
+}
+
+#tiles[data-count='1'] { grid-template-columns: 1fr; }
+#tiles[data-count='2'] { grid-template-columns: 1fr 1fr; }
+#tiles[data-count='3'], #tiles[data-count='4'] { grid-template-columns: 1fr 1fr; }
+#tiles[data-count='5'], #tiles[data-count='6'] { grid-template-columns: 1fr 1fr 1fr; }
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 6px;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  background: #fff;
+  border: 1px solid #dfe2e7;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.tile:hover { border-color: #5b6470; }
+.tile:focus-visible { outline: 2px solid #2563eb; }
+
+.tile img {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  object-fit: contain;
+}
+
+.tile .text, .tile .time {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  flex: none;
+}
+
+.tile .time { color: #5b6470; font-size: 12px; }
+
+#empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  color: #5b6470;
+}
+
+#empty[hidden] { display: none; }

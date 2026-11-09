@@ -1,4 +1,5 @@
 import { MAX_IMAGE_BASE64_LENGTH, type ImageMimeType } from '@qr2win/shared-types';
+import type { RawImage } from './enhance';
 
 export interface Point {
   x: number;
@@ -12,7 +13,7 @@ export interface Rect {
   height: number;
 }
 
-export interface CapturedImage {
+export interface EncodedImage {
   base64: string;
   mimeType: ImageMimeType;
   width: number;
@@ -46,23 +47,12 @@ function encode(canvas: HTMLCanvasElement, mimeType: ImageMimeType, quality?: nu
 }
 
 /**
- * Copies the code out of the current camera frame: the original pixels, not a regenerated code.
- * PNG preserves them exactly; JPEG and then downscaling are fallbacks for images over the size limit.
+ * Encodes a canvas without touching its pixels. PNG preserves them exactly; JPEG and then
+ * downscaling are fallbacks for images over the size limit.
  */
-export function captureFromVideo(video: HTMLVideoElement, corners: Point[]): CapturedImage | null {
-  if (!video.videoWidth || !video.videoHeight || corners.length < 3) return null;
-  const region = cropRegion(corners, video.videoWidth, video.videoHeight);
-  if (region.width < 1 || region.height < 1) return null;
-
-  const canvas = document.createElement('canvas');
-  let scale = 1;
+export function encodeCanvas(source: HTMLCanvasElement): EncodedImage | null {
+  let canvas = source;
   for (let attempt = 0; attempt < 5; attempt++) {
-    canvas.width = Math.max(1, Math.round(region.width * scale));
-    canvas.height = Math.max(1, Math.round(region.height * scale));
-    const context = canvas.getContext('2d');
-    if (!context) return null;
-    context.drawImage(video, region.x, region.y, region.width, region.height, 0, 0, canvas.width, canvas.height);
-
     const png = encode(canvas, 'image/png');
     if (png && png.length <= MAX_IMAGE_BASE64_LENGTH) {
       return { base64: png, mimeType: 'image/png', width: canvas.width, height: canvas.height };
@@ -71,7 +61,36 @@ export function captureFromVideo(video: HTMLVideoElement, corners: Point[]): Cap
     if (jpeg && jpeg.length <= MAX_IMAGE_BASE64_LENGTH) {
       return { base64: jpeg, mimeType: 'image/jpeg', width: canvas.width, height: canvas.height };
     }
-    scale /= 2;
+    const smaller = document.createElement('canvas');
+    smaller.width = Math.max(1, Math.round(canvas.width / 2));
+    smaller.height = Math.max(1, Math.round(canvas.height / 2));
+    smaller.getContext('2d')?.drawImage(canvas, 0, 0, smaller.width, smaller.height);
+    canvas = smaller;
   }
   return null;
+}
+
+export function encodeRawImage(image: RawImage): EncodedImage | null {
+  const canvas = document.createElement('canvas');
+  canvas.width = image.width;
+  canvas.height = image.height;
+  const context = canvas.getContext('2d');
+  if (!context) return null;
+  context.putImageData(new ImageData(new Uint8ClampedArray(image.data), image.width, image.height), 0, 0);
+  return encodeCanvas(canvas);
+}
+
+/** Copies a region of the camera frame, unchanged, to its own canvas. */
+export function copyRegion(frame: HTMLCanvasElement, region: Rect): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = region.width;
+  canvas.height = region.height;
+  canvas.getContext('2d', { willReadFrequently: true })?.drawImage(frame, region.x, region.y, region.width, region.height, 0, 0, region.width, region.height);
+  return canvas;
+}
+
+export function readPixels(canvas: HTMLCanvasElement): RawImage {
+  const context = canvas.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D;
+  const { data, width, height } = context.getImageData(0, 0, canvas.width, canvas.height);
+  return { data, width, height };
 }

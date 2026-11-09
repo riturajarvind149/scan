@@ -124,8 +124,12 @@ ol.steps { padding-left: 20px; display: flex; flex-direction: column; gap: 12px;
   background: #000;
 }
 
-.viewfinder video { width: 100%; height: 100%; object-fit: cover; }
+.viewfinder { touch-action: none; }
+.viewfinder-zoom { position: absolute; inset: 0; transform-origin: center; }
+.viewfinder video { display: block; width: 100%; height: 100%; object-fit: cover; }
 .viewfinder video[hidden] { display: none; }
+.code-outlines { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.code-outlines polygon { fill: rgb(76 196 122 / 0.18); stroke: var(--ok); stroke-width: 6; vector-effect: non-scaling-stroke; }
 
 .viewfinder-note { position: absolute; padding: 0 24px; text-align: center; color: var(--muted); }
 .viewfinder-note.error { color: var(--bad); }
@@ -138,6 +142,10 @@ ol.steps { padding-left: 20px; display: flex; flex-direction: column; gap: 12px;
   padding: 14px 16px max(14px, env(safe-area-inset-bottom));
 }
 
+.scan-results { display: flex; flex-direction: column; gap: 8px; }
+.camera-controls { display: flex; flex-direction: column; gap: 8px; }
+.camera-controls label { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); }
+.camera-controls input { width: 100%; min-height: 32px; accent-color: var(--accent); }
 .scan-result { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .scan-result span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 14px; color: var(--muted); }
 .scan-result.delivered strong { color: var(--ok); }

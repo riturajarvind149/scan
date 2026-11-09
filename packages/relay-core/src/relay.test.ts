@@ -8,7 +8,6 @@ import { WebSocket } from 'ws';
 import {
   MAX_IMAGE_BASE64_LENGTH,
   MAX_WS_MESSAGE_BYTES,
-  RATE_LIMIT_SCANS_PER_MINUTE,
   WS_CLOSE_UNAUTHORIZED,
   type QrImagePayload,
   type ServerMessage,
@@ -339,17 +338,6 @@ describe('relay', () => {
       expect((await client.nextOfType('error')).code).toBe('NOT_AUTHENTICATED');
     });
 
-    it('rate limits scans per phone', async () => {
-      const { desktop, phone } = await pairedClients();
-      for (let i = 0; i < RATE_LIMIT_SCANS_PER_MINUTE; i++) phone.send(scan());
-      for (let i = 0; i < RATE_LIMIT_SCANS_PER_MINUTE; i++) await desktop.nextOfType('qr-image');
-      const rejected = scan();
-      phone.send(rejected);
-      const error = await phone.nextOfType('error');
-      expect(error.code).toBe('RATE_LIMIT');
-      expect(error.scanId).toBe(rejected.scanId);
-    });
-
     it('survives garbage input', async () => {
       const { phone, desktop } = await pairedClients();
       phone.ws.send('not json');
@@ -397,7 +385,7 @@ describe('relay', () => {
 
     it('rejects an image over the limit that still fits in a frame', async () => {
       const { phone } = await pairedClients();
-      phone.send(scan({ imageBase64: TINY_PNG.replace(/=+$/, '') + 'A'.repeat(MAX_IMAGE_BASE64_LENGTH) }));
+      phone.send(scan({ imageBase64: TINY_PNG.replace(/=+$/, '') + 'A'.repeat(MAX_IMAGE_BASE64_LENGTH + 8) }));
       expect((await phone.nextOfType('error')).code).toBe('INVALID_PAYLOAD');
     });
 

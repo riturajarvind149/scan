@@ -7,19 +7,17 @@ export const PAIRING_CODE_EXPIRY_MS = 5 * 60 * 1000;
 export const MAX_IMAGE_PAYLOAD_BYTES = 5 * 1024 * 1024; // decoded image bytes
 export const MAX_IMAGE_BASE64_LENGTH = Math.ceil(MAX_IMAGE_PAYLOAD_BYTES / 3) * 4;
 export const MAX_DECODED_TEXT_LENGTH = 8192;
-/** Largest WebSocket frame accepted: the image plus a worst-case JSON-escaped envelope. */
-export const MAX_WS_MESSAGE_BYTES = MAX_IMAGE_BASE64_LENGTH + MAX_DECODED_TEXT_LENGTH * 6 + 1024;
+/** Largest WebSocket frame accepted: both images plus a worst-case JSON-escaped envelope. */
+export const MAX_WS_MESSAGE_BYTES = MAX_IMAGE_BASE64_LENGTH * 2 + MAX_DECODED_TEXT_LENGTH * 6 + 2048;
 export const MAX_IMAGE_DIMENSION = 4096;
 export const MAX_DEVICE_NAME_LENGTH = 64;
 export const MAX_PHONES_PER_DESKTOP = 20;
 export const MAX_LAPTOPS = 50;
 export const INVITE_VALID_MS = 7 * 24 * 60 * 60 * 1000;
 export const ADMIN_SESSION_MS = 12 * 60 * 60 * 1000;
-/** Limits for scans from a public link, across every sender and per IP address. */
-export const OPEN_SCANS_PER_MINUTE = 200;
-export const OPEN_CONNECTIONS_PER_IP = 20;
+/** Protects the relay's memory only. High, because a whole campus can share one IP address. */
+export const OPEN_CONNECTIONS_PER_IP = 200;
 export const ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const;
-export const RATE_LIMIT_SCANS_PER_MINUTE = 30;
 export const AUTH_TIMEOUT_MS = 10_000;
 export const WS_HEARTBEAT_INTERVAL_MS = 25_000;
 export const WS_PONG_TIMEOUT_MS = 10_000;
@@ -101,6 +99,17 @@ export interface QrImagePayload {
   imageBase64: string;
   /** Decoded QR content. Display only: never open or execute it. */
   decodedText: string;
+  /** A clearer copy, present only if independent decoders read it as exactly `decodedText`. */
+  enhanced?: EnhancedImage;
+}
+
+export interface EnhancedImage {
+  mimeType: ImageMimeType;
+  width: number;
+  height: number;
+  imageBase64: string;
+  /** What was done, in words, for display. */
+  method: string;
 }
 
 /** Desktop → relay → phone: the desktop has received and surfaced this scan. */
@@ -157,7 +166,6 @@ export type ErrorCode =
   | 'INVALID_FORMAT'
   | 'INVALID_PAYLOAD'
   | 'INVALID_ROLE'
-  | 'RATE_LIMIT'
   | 'SCANS_PAUSED'
   | 'UNKNOWN_TYPE';
 
@@ -204,25 +212,36 @@ function matchesSignature(mimeType: string, base64: string): boolean {
 }
 
 /** Returns a description of what is wrong with the scan, or null when it is acceptable. */
+function validateImage(image: Partial<EnhancedImage>): string | null {
+  if (!ALLOWED_MIME_TYPES.includes(image.mimeType as ImageMimeType)) return 'Invalid MIME type';
+  for (const size of [image.width, image.height]) {
+    if (!Number.isInteger(size) || (size as number) < 1 || (size as number) > MAX_IMAGE_DIMENSION) {
+      return 'Invalid image dimensions';
+    }
+  }
+  if (typeof image.imageBase64 !== 'string' || image.imageBase64.length === 0) return 'Missing image data';
+  if (image.imageBase64.length > MAX_IMAGE_BASE64_LENGTH) return 'Image too large';
+  if (!BASE64_PATTERN.test(image.imageBase64)) return 'Image is not valid base64';
+  if (!matchesSignature(image.mimeType as string, image.imageBase64)) {
+    return 'Image data does not match its MIME type';
+  }
+  return null;
+}
+
 export function validateQrPayload(p: unknown): string | null {
   if (typeof p !== 'object' || p === null) return 'Malformed scan';
   const scan = p as Partial<QrImagePayload>;
   if (typeof scan.scanId !== 'string' || !SCAN_ID_PATTERN.test(scan.scanId)) return 'Invalid scanId';
   if (typeof scan.timestamp !== 'number' || !Number.isFinite(scan.timestamp)) return 'Invalid timestamp';
-  if (!ALLOWED_MIME_TYPES.includes(scan.mimeType as ImageMimeType)) return 'Invalid MIME type';
-  for (const size of [scan.width, scan.height]) {
-    if (!Number.isInteger(size) || (size as number) < 1 || (size as number) > MAX_IMAGE_DIMENSION) {
-      return 'Invalid image dimensions';
-    }
-  }
   if (typeof scan.decodedText !== 'string' || scan.decodedText.length > MAX_DECODED_TEXT_LENGTH) {
     return 'Invalid decoded text';
   }
-  if (typeof scan.imageBase64 !== 'string' || scan.imageBase64.length === 0) return 'Missing image data';
-  if (scan.imageBase64.length > MAX_IMAGE_BASE64_LENGTH) return 'Image too large';
-  if (!BASE64_PATTERN.test(scan.imageBase64)) return 'Image is not valid base64';
-  if (!matchesSignature(scan.mimeType as string, scan.imageBase64)) {
-    return 'Image data does not match its MIME type';
+  const invalid = validateImage(scan as Partial<EnhancedImage>);
+  if (invalid) return invalid;
+  if (scan.enhanced !== undefined) {
+    if (typeof scan.enhanced !== 'object' || scan.enhanced === null) return 'Malformed enhanced image';
+    if (typeof scan.enhanced.method !== 'string' || scan.enhanced.method.length > 200) return 'Invalid enhanced image';
+    return validateImage(scan.enhanced);
   }
   return null;
 }

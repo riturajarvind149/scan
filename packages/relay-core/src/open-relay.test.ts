@@ -2,7 +2,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
-import { WS_CLOSE_UNAUTHORIZED, type AdminState, type QrImagePayload, type ServerMessage } from '@qr2win/shared-types';
+import { OPEN_CONNECTIONS_PER_IP, WS_CLOSE_UNAUTHORIZED, type AdminState, type QrImagePayload, type ServerMessage } from '@qr2win/shared-types';
 import { createRelay, type Relay } from './relay.js';
 import { PairingStore, type RemoteStorage } from './store.js';
 
@@ -212,37 +212,28 @@ describe('open relay', () => {
       expect((await secondConnection.nextOfType('qr-ack')).scanId).toBe(payload.scanId);
     });
 
-    it('limits scans per address even across reconnects', async () => {
-      await connected((await joinLaptop(await createInvite(await signIn()))).token);
-      let phone = await connected();
-      for (let i = 0; i < 15; i++) phone.send(scan());
-      await phone.nextOfType('pong').catch(() => undefined);
-      phone.ws.close();
-      await phone.closed;
-      phone = await connected();
-      for (let i = 0; i < 15; i++) phone.send(scan());
-      const rejected = scan();
-      phone.send(rejected);
-      const error = await phone.nextOfType('error');
-      expect(error.code).toBe('RATE_LIMIT');
-    });
-
-    it('does not spend the allowance on retries of the same scan', async () => {
+    it('does not limit how many scans get through', async () => {
       const laptop = await connected((await joinLaptop(await createInvite(await signIn()))).token);
       const phone = await connected();
-      const payload = scan();
-      for (let i = 0; i < 40; i++) phone.send(payload);
+      const count = 300;
+      for (let i = 0; i < count; i++) phone.send(scan());
+      for (let i = 0; i < count; i++) await laptop.nextOfType('qr-image');
       phone.send({ type: 'ping' });
-      await phone.nextOfType('pong');
-      laptop.send({ type: 'qr-ack', scanId: payload.scanId });
-      await phone.nextOfType('qr-ack');
-      phone.send(scan());
-      phone.send({ type: 'ping' });
-      expect(await phone.silentFor(150, 'error')).toBe(true);
+      expect(await phone.silentFor(100, 'error')).toBe(true);
+    });
+
+    it('carries the enhanced copy along with the original', async () => {
+      const laptop = await connected((await joinLaptop(await createInvite(await signIn()))).token);
+      const phone = await connected();
+      const payload = { ...scan(), enhanced: { mimeType: 'image/png' as const, width: 1, height: 1, imageBase64: TINY_PNG, method: 'squared up' } };
+      phone.send(payload);
+      const received = await laptop.nextOfType('qr-image');
+      expect(received.imageBase64).toBe(TINY_PNG);
+      expect(received.enhanced?.method).toBe('squared up');
     });
 
     it('limits how many connections one address can hold open', async () => {
-      for (let i = 0; i < 20; i++) await connected();
+      for (let i = 0; i < OPEN_CONNECTIONS_PER_IP; i++) await connected();
       const extra = await connect();
       expect(await extra.closed).toBe(1013);
     });

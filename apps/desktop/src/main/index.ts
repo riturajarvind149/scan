@@ -92,6 +92,7 @@ function buildState() {
       unreachableByPhones: !!settings.serverUrl && isLoopbackUrl(settings.serverUrl),
     },
     scans: presenter.getHistory(),
+    liveView: settings.liveView,
     startWithWindows: app.getLoginItemSettings(loginItemOptions()).openAtLogin,
     canAutoStart: app.isPackaged,
   };
@@ -112,11 +113,18 @@ function updateTray(): void {
       { label, enabled: false },
       { type: 'separator' },
       { label: 'Show latest QR code', enabled: presenter.hasScans(), click: () => presenter.openLatest() },
+      { label: 'Live view', type: 'checkbox', checked: settings.liveView, click: (item) => setLiveView(item.checked) },
       { label: 'Open QR-to-Windows-11', click: showMainWindow },
       { type: 'separator' },
       { label: 'Quit', click: () => app.quit() },
     ]),
   );
+}
+
+function setLiveView(enabled: boolean): void {
+  settings.liveView = enabled;
+  presenter.setLiveView(enabled);
+  broadcastState();
 }
 
 function createTray(): void {
@@ -223,6 +231,16 @@ function setupIpc(): void {
     broadcastState();
   });
 
+  handle('set-live-view', (enabled: boolean) => {
+    setLiveView(!!enabled);
+  });
+
+  handle('get-live-scans', () => presenter.getLiveScans());
+
+  ipcMain.on('live-open-scan', (event, scanId: unknown) => {
+    if (fromTrustedPage(event) && typeof scanId === 'string') presenter.openPopup(scanId);
+  });
+
   handle('open-scan', (scanId: string) => {
     if (typeof scanId === 'string') presenter.openPopup(scanId);
   });
@@ -279,7 +297,10 @@ function start(): void {
   if (app.isPackaged && !userDataOverride && settings.claimAutoStartInitialization()) {
     app.setLoginItemSettings({ ...loginItemOptions(), openAtLogin: true });
   }
-  presenter = new ScanPresenter(assetPath, assetPath('icon.ico'), broadcastState, showMainWindow);
+  presenter = new ScanPresenter(assetPath, assetPath('icon.ico'), broadcastState, showMainWindow, () => {
+    settings.liveView = false;
+    broadcastState();
+  });
   Notification.handleActivation((details) => presenter.handleToastActivation(details.arguments));
   const events: ChannelEvents = {
     onScan: (scan, ack) => presenter.receive(scan, ack),
@@ -296,6 +317,7 @@ function start(): void {
 
   if (settings.localEnabled) void local.start();
   internet.start();
+  if (settings.liveView) presenter.setLiveView(true);
 
   // Test instances have an explicit data folder and must not take over this machine's links.
   if (app.isPackaged && !userDataOverride) app.setAsDefaultProtocolClient(PROTOCOL);

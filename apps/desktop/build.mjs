@@ -7,7 +7,7 @@ import { build } from 'esbuild';
 const { defaultRelayUrl = '' } = JSON.parse(fs.readFileSync('package.json', 'utf-8')).qr2win ?? {};
 
 await build({
-  entryPoints: ['src/main/index.ts', 'src/main/preload.ts', 'src/main/popup-preload.ts'],
+  entryPoints: ['src/main/index.ts', 'src/main/preload.ts', 'src/main/popup-preload.ts', 'src/main/live-preload.ts'],
   outdir: 'dist/main',
   bundle: true,
   platform: 'node',

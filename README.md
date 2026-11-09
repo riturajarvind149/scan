@@ -22,6 +22,8 @@ The phone needs no app or pairing: anyone with your relay's link opens it and sc
 
 The dashboard lists the laptops, removes them, cancels the invite link, and can pause scanning.
 
+**Live view:** tick **Live view** in the desktop app for an always-on-top window that shows codes as they arrive, with no notification to click. Good for codes that keep changing, like attendance codes on a projector. Several codes in view at once each get their own tile or notification.
+
 **Same Wi-Fi instead of a relay:** in the app choose **Same Wi-Fi**, then **Show pairing code**, and scan it with your phone's normal camera.
 
 **First time on Wi-Fi:** the phone warns that the connection isn't private, because your laptop isn't a public website with a purchased certificate. Choose **Advanced**, then **Proceed**. Traffic is still encrypted. Windows also asks whether to allow the app through the firewall; allow it for the type of network you're on.
@@ -102,11 +104,13 @@ It runs as a single instance, because live connections are held in that process.
 
 **Delivery.** A scan shows as delivered on the phone only once the laptop confirms it. If the laptop is offline, the phone holds the scan for up to 5 minutes and sends it when the laptop returns. Both sides reconnect by themselves and detect dead connections with heartbeats.
 
-**The image.** The phone copies the code's pixels straight from the camera frame into a PNG with a clear margin around it. It is never regenerated from the decoded text.
+**The image.** The phone copies the code's pixels straight from the sharpest of a few camera frames into a PNG, which is always sent. It is never regenerated from the decoded text.
+
+**Enhancement.** The phone also tries to make a clearer copy, by squaring up the code, evening out glare, stretching contrast and sharpening edges. These keep the code's real shades and never force pixels to pure black and white. The copy is used only if two independent decoders, in their normal mode, both read it as exactly the same text as the capture; otherwise only the original is shown. The laptop shows the clearer copy by default, labelled as checked, with a button to see the original.
 
 ## Security
 
-- **The public phone link:** anyone who has your relay's link can send images to your laptops, so treat it like a private address. Senders are limited to 30 scans a minute per IP address and 200 a minute overall, and the dashboard can pause scanning. Search engines are asked not to index it.
+- **The public phone link:** anyone who has your relay's link can send images to your laptops, as many as they like, so treat it like a private address. The dashboard's pause switch is the protection against abuse. Search engines are asked not to index it.
 - **Laptops:** only an invite link or an existing credential gets a laptop on the relay. Invites last 7 days, work for several laptops until cancelled, and every join notifies the other laptops. A laptop removed from the dashboard is cut off immediately.
 - **Dashboard:** protected by `ADMIN_PASSWORD`, with 5 sign-in attempts a minute per IP address and sessions that end after 12 hours.
 - **Same-Wi-Fi pairing:** 6-digit codes are single use, expire in 5 minutes, and are rate limited to 10 attempts per minute per IP address.
@@ -121,7 +125,8 @@ The relay passes images through without storing them, but the relay operator cou
 ## Known limitations
 
 - **Notifications:** Do Not Disturb, Focus and full-screen apps can hide toasts, and Windows controls this. Scans still appear under **Recent scans** and in the tray menu's **Show latest QR code**.
-- **Image fidelity:** it's a photo of the code, so glare, angle and focus carry over. The crop is a straight rectangle, not perspective-corrected.
+- **Image fidelity:** the original is a photo of the code, so glare, angle and focus carry over. If glare has burned out part of a code entirely, no enhancement can restore those pixels; try moving to one side or lowering the brightness slider.
+- **Camera controls:** zoom and brightness use the camera's own controls where the browser offers them. Elsewhere, zoom is digital, and the brightness slider doesn't appear; iPhones generally fall in this group.
 - **iPhone on same-Wi-Fi:** Safari has historically been strict about secure WebSockets with self-signed certificates. If the page loads but never connects, use internet mode.
 - **Changed networks (same-Wi-Fi mode only):** a new network usually means a new laptop address, and browsers treat that as a different site, so the phone pairs again there. Internet mode has no such issue.
 - **Free hosting:** the first request after the relay has been idle can take about a minute. Render's free plan also has a monthly hours limit.
