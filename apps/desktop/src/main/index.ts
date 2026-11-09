@@ -169,7 +169,7 @@ async function handleDeepLink(link: string): Promise<void> {
     type: 'question',
     title: 'Join this relay?',
     message: `Receive scanned QR codes from ${new URL(invite.origin).host}?`,
-    detail: 'Only continue if you asked for this invite. Images sent through this relay will appear as notifications on this PC.',
+    detail: 'Only continue if you asked for this invite. Images sent through this relay will pop up on this PC.',
     buttons: ['Join', 'Cancel'],
     defaultId: 0,
     cancelId: 1,
@@ -297,11 +297,12 @@ function start(): void {
   if (app.isPackaged && !userDataOverride && settings.claimAutoStartInitialization()) {
     app.setLoginItemSettings({ ...loginItemOptions(), openAtLogin: true });
   }
-  presenter = new ScanPresenter(assetPath, assetPath('icon.ico'), broadcastState, showMainWindow, () => {
+  presenter = new ScanPresenter(assetPath, assetPath('icon.ico'), broadcastState, () => {
     settings.liveView = false;
     broadcastState();
   });
-  Notification.handleActivation((details) => presenter.handleToastActivation(details.arguments));
+  // The only notifications left announce a new phone or laptop, which are managed from the app.
+  Notification.handleActivation(showMainWindow);
   const events: ChannelEvents = {
     onScan: (scan, ack) => presenter.receive(scan, ack),
     onEnhanced: (scanId, enhanced) => presenter.applyEnhancement(scanId, enhanced),

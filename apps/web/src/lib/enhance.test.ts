@@ -6,7 +6,7 @@ import jsQR from 'jsqr';
 import QRCode from 'qrcode';
 import { prepareZXingModule } from 'zxing-wasm/reader';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { enhanceVerified, flattenShading, rectify, sharpen, sharpnessScore, stretchLevels, type RawImage } from './enhance';
+import { enhanceVerified, flattenShading, rectify, removeColourCast, sharpen, sharpnessScore, stretchLevels, type RawImage } from './enhance';
 import { decodeIndependently, decodeQrCodes } from './qr-decoder';
 
 const require = createRequire(import.meta.url);
@@ -276,10 +276,79 @@ describe('enhancement never changes the code', () => {
     const image = renderScene(TEXT, HARD_SCENES['projector, washed out']);
     const before = new Uint8ClampedArray(image.data);
     stretchLevels(image);
+    removeColourCast(image);
     flattenShading(image);
     sharpen(image);
     rectify(image, [{ x: 400, y: 120 }, { x: 860, y: 120 }, { x: 860, y: 580 }, { x: 400, y: 580 }], false);
     expect(image.data).toEqual(before);
+  });
+});
+
+describe('a code photographed off a tinted screen', () => {
+  const TILTED = HARD_SCENES['tilted, photographed off a screen'];
+
+  /** Recolours a grey scene, the way a blue screen and a phone's camera tint a photo. */
+  function tinted(image: RawImage, multiply: [number, number, number], add: [number, number, number] = [0, 0, 0]): RawImage {
+    const data = new Uint8ClampedArray(image.data);
+    for (let at = 0; at < data.length; at += 4) {
+      for (let channel = 0; channel < 3; channel++) data[at + channel] = image.data[at + channel] * multiply[channel] + add[channel];
+    }
+    return { data, width: image.width, height: image.height };
+  }
+
+  /** The average difference between a pixel's strongest and weakest colour channels. */
+  function colourfulness(image: RawImage): number {
+    let total = 0;
+    for (let at = 0; at < image.data.length; at += 4) {
+      const pixel = [image.data[at], image.data[at + 1], image.data[at + 2]];
+      total += Math.max(...pixel) - Math.min(...pixel);
+    }
+    return total / (image.width * image.height);
+  }
+
+  it('comes out straight, square, neutral and reading the same', async () => {
+    const photo = tinted(renderScene(TEXT, TILTED), [0.72, 0.85, 1], [10, 25, 45]);
+    expect(colourfulness(photo)).toBeGreaterThan(30);
+    const enhanced = await enhanceVerified(cloneAll(photo), TEXT, decodeQrCodes, decodeIndependently);
+    expect(enhanced).not.toBeNull();
+    expect(enhanced!.image.width).toBe(enhanced!.image.height);
+    expect(colourfulness(enhanced!.image)).toBeLessThan(2);
+    expect((await decodeQrCodes(enhanced!.image)).map((result) => result.text)).toEqual([TEXT]);
+  });
+
+  it('crops away the surroundings, down to the code and its margin', async () => {
+    // The background here is mid grey. After cropping, none of it should be left in the corners.
+    const photo = renderScene(TEXT, { ...TILTED, moire: 0, noise: 0, blur: 0 });
+    const { image } = (await enhanceVerified(cloneAll(photo), TEXT, decodeQrCodes, decodeIndependently))!;
+    for (const [x, y] of [[2, 2], [image.width - 3, 2], [2, image.height - 3], [image.width - 3, image.height - 3]]) {
+      expect(image.data[(y * image.width + x) * 4]).toBe(255);
+    }
+  });
+
+  it('keeps a code that is really coloured from turning grey', () => {
+    const size = 200;
+    const data = new Uint8ClampedArray(size * size * 4);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const at = (y * size + x) * 4;
+        const module = (Math.floor(x / 20) + Math.floor(y / 20)) % 2 === 0;
+        data.set(module ? [30, 40, 200, 255] : [235, 235, 235, 255], at);
+      }
+    }
+    const result = removeColourCast({ data, width: size, height: size });
+    expect(colourfulness(result)).toBeGreaterThan(30);
+  });
+
+  it('never lets a dark module become lighter than a light one', () => {
+    const photo = tinted(renderScene(TEXT, HARD_SCENES['projector, washed out']), [0.8, 0.9, 1]);
+    const lum = (image: RawImage, at: number) => 0.299 * image.data[at] + 0.587 * image.data[at + 1] + 0.114 * image.data[at + 2];
+    const result = removeColourCast(photo);
+    const order: number[] = [];
+    for (let at = 0; at < photo.data.length; at += 4) order.push(at);
+    order.sort((a, b) => lum(photo, a) - lum(photo, b));
+    const quarter = Math.floor(order.length / 4);
+    const average = (part: number[]) => part.reduce((sum, at) => sum + lum(result, at), 0) / part.length;
+    expect(average(order.slice(0, quarter))).toBeLessThan(average(order.slice(-quarter)));
   });
 });
 

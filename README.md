@@ -1,10 +1,10 @@
 # QR-to-Windows 11
 
-Scan any QR code with your phone and see that exact image on your Windows 11 laptops. Open your link, point the phone, get a notification, click it, and an always-on-top window shows the code.
+Scan any QR code with your phone and see that exact image on your Windows 11 laptops. Open your link, point the phone, and an always-on-top window pops up on the laptop showing the code, straightened and cropped.
 
 ```
  Phone browser                                       Windows 11 app
- (camera + scanner)                                  (toast → popup)
+ (camera + scanner)                                  (always-on-top popup)
        │                                                    ▲
        │  Same Wi-Fi: HTTPS/WSS straight to the laptop      │
        ├────────────────────────────────────────────────────┤
@@ -18,11 +18,11 @@ The phone needs no app or pairing: anyone with your relay's link opens it and sc
 
 1. In the dashboard at `https://your-relay/admin`, choose **Create invite link** and open that link on each laptop. It offers the installer and then joins the laptop to the relay.
 2. On any phone, open `https://your-relay` and allow the camera. Bookmark it.
-3. Point the phone at any QR code. A Windows notification appears on every laptop; click it to see the code in a floating window that stays on top until you close it.
+3. Point the phone at any QR code. A floating window pops up on every laptop and stays on top until you close it. It shows the code straightened, cropped and neutral in colour whenever that copy reads exactly the same as the original photo, and **Show original** switches to the photo itself.
 
 The dashboard lists the laptops, removes them, cancels the invite link, and can pause scanning.
 
-**Live view:** tick **Live view** in the desktop app for an always-on-top window that shows codes as they arrive, with no notification to click. Good for codes that keep changing, like attendance codes on a projector. Several codes in view at once each get their own tile or notification.
+**Live view:** tick **Live view** in the desktop app for an always-on-top window that shows codes as they arrive, rather than a popup for each. Good for codes that keep changing, like attendance codes on a projector. Several codes in view at once each get their own tile or popup, placed side by side.
 
 **Same Wi-Fi instead of a relay:** in the app choose **Same Wi-Fi**, then **Show pairing code**, and scan it with your phone's normal camera.
 
@@ -42,13 +42,13 @@ npm install
 npm run dev:desktop
 ```
 
-That builds everything and opens the app. Windows only delivers notification clicks to an installed app, so use the [installer](#build-the-installer) to try that step.
+That builds everything and opens the app.
 
 | Command | What it does |
 | --- | --- |
 | `npm test` | Unit and integration tests; nothing needs building first |
 | `npm run typecheck` | Type-checks every workspace |
-| `npm run test:e2e` | Full run against the real app and Edge with a simulated camera (Windows; shows real toasts) |
+| `npm run test:e2e` | Full run against the real app and Edge with a simulated camera (Windows; shows real popups) |
 | `npm run dev:server` | Relay on port 3001, serving the phone app if it has been built with `npm run build:web` |
 | `npm run dev:web` | Phone app with hot reload at `localhost:5173`, proxying to the local relay |
 
@@ -124,7 +124,6 @@ The relay passes images through without storing them, but the relay operator cou
 
 ## Known limitations
 
-- **Notifications:** Do Not Disturb, Focus and full-screen apps can hide toasts, and Windows controls this. Scans still appear under **Recent scans** and in the tray menu's **Show latest QR code**.
 - **Image fidelity:** the original is a photo of the code, so glare, angle and focus carry over. If glare has burned out part of a code entirely, no enhancement can restore those pixels; try moving to one side or lowering the brightness slider.
 - **Camera controls:** zoom and brightness use the camera's own controls where the browser offers them. Elsewhere, zoom is digital, and the brightness slider doesn't appear; iPhones generally fall in this group.
 - **iPhone on same-Wi-Fi:** Safari has historically been strict about secure WebSockets with self-signed certificates. If the page loads but never connects, use internet mode.

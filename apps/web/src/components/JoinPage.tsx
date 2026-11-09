@@ -39,7 +39,7 @@ export function JoinPage({ config, token }: JoinPageProps) {
   return (
     <main className="page">
       <h1>Add this laptop</h1>
-      <p className="muted">This laptop will get a Windows notification for every QR code scanned on {new URL(SERVER_ORIGIN).host}.</p>
+      <p className="muted">A popup will appear on this laptop for every QR code scanned on {new URL(SERVER_ORIGIN).host}.</p>
       <ol className="steps">
         <li>
           <p>Install the desktop app, if this laptop doesn't have it yet.</p>

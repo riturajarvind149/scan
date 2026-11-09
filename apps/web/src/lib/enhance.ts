@@ -39,6 +39,12 @@ const CORNER_SLACK = 0.03;
 const SHADING_GRID = 24;
 const LEVELS_CLIP = 0.01;
 const SHARPEN_AMOUNT = 0.6;
+/** Below this difference between dark and light modules, a colour channel holds mostly noise. */
+const MIN_CHANNEL_RANGE = 12;
+/** Channels separating the modules this similarly mean a black and white code under coloured light. */
+const MONOCHROME_RATIO = 0.65;
+const NEUTRAL_DARK = 16;
+const NEUTRAL_LIGHT = 245;
 
 function blank(width: number, height: number): RawImage {
   return { data: new Uint8ClampedArray(width * height * 4), width, height };
@@ -115,6 +121,78 @@ export function rectify(source: RawImage, corners: Point[], inverted: boolean, m
       out.data[at + 1] = total[1] / samples;
       out.data[at + 2] = total[2] / samples;
     }
+  }
+  return out;
+}
+
+/**
+ * Removes a colour cast, such as the blue of a photographed screen. Each channel is rescaled evenly,
+ * so within a channel dark stays darker than light and no module can flip. A black and white code
+ * comes out truly neutral, while a code that is really coloured only has its white corrected.
+ */
+export function removeColourCast(source: RawImage): RawImage {
+  const { data, width, height } = source;
+  // Measured on the code alone: the added margin is pure white and would hide the cast.
+  const inset = Math.floor(Math.min(width, height) * QUIET_ZONE);
+  const histogram = new Uint32Array(256);
+  let measured = 0;
+  for (let y = inset; y < height - inset; y++) {
+    for (let x = inset; x < width - inset; x++) {
+      histogram[Math.round(luminance(data, (y * width + x) * 4))]++;
+      measured++;
+    }
+  }
+  let low = 0;
+  let high = 255;
+  for (let seen = 0; low < 255 && seen + histogram[low] <= measured * 0.05; low++) seen += histogram[low];
+  for (let seen = 0; high > 0 && seen + histogram[high] <= measured * 0.05; high--) seen += histogram[high];
+  const middle = (low + high) / 2;
+
+  const dark = [0, 0, 0];
+  const light = [0, 0, 0];
+  let darkCount = 0;
+  let lightCount = 0;
+  for (let y = inset; y < height - inset; y++) {
+    for (let x = inset; x < width - inset; x++) {
+      const at = (y * width + x) * 4;
+      const isLight = luminance(data, at) >= middle;
+      const totals = isLight ? light : dark;
+      for (let channel = 0; channel < 3; channel++) totals[channel] += data[at + channel];
+      if (isLight) lightCount++;
+      else darkCount++;
+    }
+  }
+  if (darkCount === 0 || lightCount === 0) return source;
+  for (let channel = 0; channel < 3; channel++) {
+    dark[channel] /= darkCount;
+    light[channel] /= lightCount;
+  }
+  const ranges = light.map((value, channel) => value - dark[channel]);
+  if (Math.min(...ranges) < MIN_CHANNEL_RANGE) {
+    // One channel barely separates the modules, as with a yellow code. Rescaling it would only amplify noise.
+    return Math.max(...ranges) < MIN_CHANNEL_RANGE ? source : balanceWhite(source, light);
+  }
+  if (Math.min(...ranges) / Math.max(...ranges) < MONOCHROME_RATIO) return balanceWhite(source, light);
+
+  const span = NEUTRAL_LIGHT - NEUTRAL_DARK;
+  const out = blank(width, height);
+  for (let at = 0; at < data.length; at += 4) {
+    let level = 0;
+    for (let channel = 0; channel < 3; channel++) level += (data[at + channel] - dark[channel]) / ranges[channel];
+    const shade = NEUTRAL_DARK + (level / 3) * span;
+    out.data[at] = out.data[at + 1] = out.data[at + 2] = shade;
+    out.data[at + 3] = 255;
+  }
+  return out;
+}
+
+function balanceWhite(source: RawImage, white: number[]): RawImage {
+  const { data, width, height } = source;
+  const out = blank(width, height);
+  const gains = white.map((value) => NEUTRAL_LIGHT / Math.max(1, value));
+  for (let at = 0; at < data.length; at += 4) {
+    for (let channel = 0; channel < 3; channel++) out.data[at + channel] = data[at + channel] * gains[channel];
+    out.data[at + 3] = 255;
   }
   return out;
 }
@@ -240,11 +318,12 @@ export async function enhanceVerified(
   if (!found) return null;
 
   const rectified = rectify(crop, found.corners, found.inverted, found.modules);
-  const evened = found.inverted ? rectified : flattenShading(rectified);
+  const neutral = removeColourCast(rectified);
+  const evened = found.inverted ? neutral : flattenShading(neutral);
   const candidates: [string, () => RawImage][] = [
-    ['squared up, lighting evened out, sharpened', () => sharpen(stretchLevels(evened))],
-    ['squared up, lighting evened out', () => stretchLevels(evened)],
-    ['squared up, contrast adjusted', () => stretchLevels(rectified)],
+    ['squared up, colour and lighting corrected, sharpened', () => sharpen(stretchLevels(evened))],
+    ['squared up, colour and lighting corrected', () => stretchLevels(evened)],
+    ['squared up, colour corrected', () => stretchLevels(neutral)],
     ['squared up', () => rectified],
   ];
   for (const [method, build] of candidates) {

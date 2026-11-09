@@ -1,4 +1,4 @@
-import { BrowserWindow, Notification, screen } from 'electron';
+import { BrowserWindow, screen } from 'electron';
 import path from 'node:path';
 import { validateEnhancedImage, validateQrPayload, type EnhancedImage, type QrImagePayload } from '@qr2win/shared-types';
 
@@ -9,8 +9,12 @@ const LIVE_HEIGHT = 560;
 const SEEN_LIMIT = 500;
 const POPUP_WIDTH = 360;
 const POPUP_HEIGHT = 440;
-const TEXT_PREVIEW_LENGTH = 80;
-const ACTIVATION_SETTLE_MS = 150;
+const POPUP_GAP = 16;
+/**
+ * The straightened copy follows the first photo closely. A new popup waits this long for it, so
+ * the code usually appears clean rather than changing a moment later. It never waits any longer.
+ */
+const HOLD_FOR_CLEARER_MS = 800;
 
 export interface ScanSummary {
   scanId: string;
@@ -18,25 +22,21 @@ export interface ScanSummary {
   timestamp: number;
 }
 
-/** Turns received scans into Windows notifications and, on click, always-on-top popups. */
+/** Turns received scans into always-on-top popups, or tiles in the live window when that is on. */
 export class ScanPresenter {
   private history: QrImagePayload[] = [];
   private seen = new Set<string>();
   private popups = new Map<string, BrowserWindow>();
-  /**
-   * Windows only delivers a toast's click while its Notification object is alive, and JavaScript
-   * would otherwise collect it, so recent ones stay referenced.
-   */
-  private notifications: Notification[] = [];
-  private lastInstanceClickAt = 0;
+  /** Where each popup sits, so a new one can take the first free place. */
+  private slots = new Map<string, number>();
+  /** Shows a popup still hidden while it waits for the clearer copy. */
+  private reveals = new Map<string, () => void>();
   private live: BrowserWindow | null = null;
 
   constructor(
     private readonly assetPath: (...parts: string[]) => string,
     private readonly iconPath: string,
     private readonly onChange: () => void,
-    /** A toast was clicked but there is no scan to show, as after a restart. */
-    private readonly onEmptyActivation: () => void,
     /** The person closed the live window, which turns live view off. */
     private readonly onLiveClosed: () => void,
   ) {}
@@ -57,7 +57,7 @@ export class ScanPresenter {
     this.history.unshift(scan);
     this.history.length = Math.min(this.history.length, HISTORY_LIMIT);
     if (this.live && !this.live.isDestroyed()) this.live.webContents.send('live-scan', scan);
-    else this.notify(scan);
+    else this.present(scan);
     ack();
     this.onChange();
   }
@@ -69,25 +69,8 @@ export class ScanPresenter {
     scan.enhanced = enhanced;
     const popup = this.popups.get(scanId);
     if (popup && !popup.isDestroyed()) popup.webContents.send('scan-enhanced', scan);
+    this.reveals.get(scanId)?.();
     if (this.live && !this.live.isDestroyed()) this.live.webContents.send('live-scan', scan);
-  }
-
-  /**
-   * Handles a toast click reported by Windows, including one made later from the notification
-   * center, when the Notification object may be long gone. Windows passes back the toast's arguments.
-   */
-  handleToastActivation(activationArguments: string): void {
-    const scan = this.history.find((item) => activationArguments.includes(item.scanId));
-    if (scan) {
-      this.showPopup(scan);
-      return;
-    }
-    // No id to go on. The toast's own click event may be about to handle it, so give that a moment.
-    setTimeout(() => {
-      if (Date.now() - this.lastInstanceClickAt < ACTIVATION_SETTLE_MS * 2) return;
-      if (this.history[0]) this.showPopup(this.history[0]);
-      else this.onEmptyActivation();
-    }, ACTIVATION_SETTLE_MS);
   }
 
   getHistory(): ScanSummary[] {
@@ -174,35 +157,31 @@ export class ScanPresenter {
       if (!popup.isDestroyed()) popup.destroy();
     }
     this.popups.clear();
+    this.slots.clear();
+    this.reveals.clear();
     this.setLiveView(false);
   }
 
-  private notify(scan: QrImagePayload): void {
-    if (!Notification.isSupported()) {
-      this.showPopup(scan);
-      return;
-    }
-    const notification = new Notification({
-      id: scan.scanId,
-      title: 'QR code received',
-      body: `Click to view. ${previewText(scan.decodedText)}`.trim(),
-      icon: this.iconPath,
+  /** Opens a new scan's popup without taking focus, so a code arriving never interrupts typing. */
+  private present(scan: QrImagePayload): void {
+    const popup = this.createPopup(scan);
+    let ready = false;
+    let holdOver = false;
+    const reveal = () => {
+      if (ready && (holdOver || scan.enhanced) && !popup.isDestroyed() && !popup.isVisible()) popup.showInactive();
+    };
+    popup.once('ready-to-show', () => {
+      ready = true;
+      reveal();
     });
-    notification.on('click', () => {
-      this.lastInstanceClickAt = Date.now();
-      this.showPopup(scan);
-    });
-    // If Windows refuses the toast, the scan must still reach the user.
-    notification.on('failed', (_event, error) => {
-      console.warn('[scan] Notification failed:', error);
-      this.showPopup(scan);
-    });
-    notification.show();
-
-    this.notifications.push(notification);
-    if (this.notifications.length > HISTORY_LIMIT) this.notifications.shift();
+    setTimeout(() => {
+      holdOver = true;
+      reveal();
+    }, HOLD_FOR_CLEARER_MS);
+    this.reveals.set(scan.scanId, reveal);
   }
 
+  /** Opens a popup the person asked for, from the recent scans or the tray. */
   private showPopup(scan: QrImagePayload): void {
     const existing = this.popups.get(scan.scanId);
     if (existing && !existing.isDestroyed()) {
@@ -210,16 +189,42 @@ export class ScanPresenter {
       existing.focus();
       return;
     }
+    const popup = this.createPopup(scan);
+    popup.once('ready-to-show', () => {
+      popup.show();
+      popup.focus();
+    });
+  }
 
+  private forget(scanId: string): void {
+    this.popups.delete(scanId);
+    this.slots.delete(scanId);
+    this.reveals.delete(scanId);
+  }
+
+  /** Creates a hidden popup in the first free place on screen, so each code stays fully visible. */
+  private createPopup(scan: QrImagePayload): BrowserWindow {
     const { workArea } = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-    const offset = (this.popups.size % 5) * 28; // cascade so consecutive scans stay visible
+    const columns = Math.max(1, Math.floor((workArea.width - POPUP_GAP) / (POPUP_WIDTH + POPUP_GAP)));
+    const rows = Math.max(1, Math.floor((workArea.height - POPUP_GAP) / (POPUP_HEIGHT + POPUP_GAP)));
+    const places = columns * rows;
+    if (this.popups.size >= places) {
+      // The screen is full. The oldest makes way, and stays available under recent scans.
+      const [oldestId, oldest] = this.popups.entries().next().value as [string, BrowserWindow];
+      if (!oldest.isDestroyed()) oldest.destroy();
+      this.forget(oldestId);
+    }
+    const taken = new Set(this.slots.values());
+    let slot = 0;
+    while (taken.has(slot)) slot++;
+
     const popup = new BrowserWindow({
       width: POPUP_WIDTH,
       height: POPUP_HEIGHT,
       minWidth: 240,
       minHeight: 280,
-      x: Math.round(workArea.x + workArea.width - POPUP_WIDTH - 24 - offset),
-      y: Math.round(workArea.y + workArea.height - POPUP_HEIGHT - 24 - offset),
+      x: Math.round(workArea.x + workArea.width - (POPUP_WIDTH + POPUP_GAP) * ((slot % columns) + 1)),
+      y: Math.round(workArea.y + workArea.height - (POPUP_HEIGHT + POPUP_GAP) * (Math.floor(slot / columns) + 1)),
       frame: false,
       alwaysOnTop: true,
       show: false,
@@ -237,17 +242,12 @@ export class ScanPresenter {
     popup.setAlwaysOnTop(true, 'screen-saver');
     popup.webContents.on('will-navigate', (event) => event.preventDefault());
     popup.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-    popup.once('ready-to-show', () => {
-      popup.show();
-      popup.focus();
+    popup.on('closed', () => {
+      if (this.popups.get(scan.scanId) === popup) this.forget(scan.scanId);
     });
-    popup.on('closed', () => this.popups.delete(scan.scanId));
     this.popups.set(scan.scanId, popup);
+    this.slots.set(scan.scanId, slot);
     void popup.loadFile(this.assetPath('popup.html'));
+    return popup;
   }
-}
-
-function previewText(text: string): string {
-  const clean = text.replace(/\p{Cc}+/gu, ' ').trim();
-  return clean.length > TEXT_PREVIEW_LENGTH ? `${clean.slice(0, TEXT_PREVIEW_LENGTH)}…` : clean;
 }

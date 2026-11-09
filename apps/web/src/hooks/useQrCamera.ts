@@ -142,13 +142,28 @@ export function useQrCamera(
   const zoomRef = useRef({ value: 1, hardware: false });
   const brightnessRef = useRef({ value: 0, userSet: false, min: 0, step: 0, lastAuto: 0, available: false });
 
+  const zoomSending = useRef(false);
+
+  /** A pinch changes the zoom far faster than a camera can follow, so only the latest value is sent. */
+  const sendZoom = useCallback(() => {
+    const track = trackRef.current;
+    if (!track || zoomSending.current) return;
+    zoomSending.current = true;
+    const sent = zoomRef.current.value;
+    void track
+      .applyConstraints({ advanced: [{ zoom: sent } as ZoomConstraints as MediaTrackConstraintSet] })
+      .catch(() => undefined)
+      .finally(() => {
+        zoomSending.current = false;
+        if (zoomRef.current.value !== sent) sendZoom();
+      });
+  }, []);
+
   const setZoom = useCallback((value: number) => {
     setZoomValue(value);
     zoomRef.current.value = value;
-    if (zoomRef.current.hardware) {
-      void trackRef.current?.applyConstraints({ advanced: [{ zoom: value } as ZoomConstraints as MediaTrackConstraintSet] }).catch(() => undefined);
-    }
-  }, []);
+    if (zoomRef.current.hardware) sendZoom();
+  }, [sendZoom]);
 
   const applyBrightness = useCallback((value: number) => {
     setBrightnessValue(value);
