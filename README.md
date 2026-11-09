@@ -18,11 +18,11 @@ The phone needs no app or pairing: anyone with your relay's link opens it and sc
 
 1. In the dashboard at `https://your-relay/admin`, choose **Create invite link** and open that link on each laptop. It offers the installer and then joins the laptop to the relay.
 2. On any phone, open `https://your-relay` and allow the camera. Bookmark it.
-3. Point the phone at any QR code. A floating window pops up on every laptop and stays on top until you close it. It shows the code straightened, cropped and neutral in colour whenever that copy reads exactly the same as the original photo, and **Show original** switches to the photo itself.
+3. Point the phone at any QR code. A green tick shows it was scanned and the camera holds still, so one code is only sent once; tap **Rescan** to scan again. A floating window pops up on every laptop and stays on top until you close it. It shows the code straightened, cropped and neutral in colour whenever that copy reads exactly the same as the original photo, and **Show original** switches to the photo itself.
 
 The dashboard lists the laptops, removes them, cancels the invite link, and can pause scanning.
 
-**Live view:** tick **Live view** in the desktop app for an always-on-top window that shows codes as they arrive, rather than a popup for each. Good for codes that keep changing, like attendance codes on a projector. Several codes in view at once each get their own tile or popup, placed side by side.
+**Live view:** tick **Live view** in the desktop app for an always-on-top window that shows codes as they arrive, rather than a popup for each. Good for codes you keep an eye on, like attendance codes on a projector. Several codes in view at once each get their own tile or popup, placed side by side.
 
 **Same Wi-Fi instead of a relay:** in the app choose **Same Wi-Fi**, then **Show pairing code**, and scan it with your phone's normal camera.
 

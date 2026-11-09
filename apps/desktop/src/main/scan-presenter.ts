@@ -14,7 +14,7 @@ const POPUP_GAP = 16;
  * The straightened copy follows the first photo closely. A new popup waits this long for it, so
  * the code usually appears clean rather than changing a moment later. It never waits any longer.
  */
-const HOLD_FOR_CLEARER_MS = 800;
+const HOLD_FOR_CLEARER_MS = 1500;
 
 export interface ScanSummary {
   scanId: string;

@@ -273,7 +273,8 @@ function onPhonePaired(phone: PhoneSummary, mode: ChannelMode): void {
  * installer's shortcut only carries the app id, so without this toasts appear but clicks do nothing.
  */
 function registerToastShortcut(): void {
-  if (!app.isPackaged) return;
+  // A test run of a packaged build must not repoint the shortcut of the copy that's really installed.
+  if (!app.isPackaged || userDataOverride) return;
   const shortcut = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'QR-to-Windows-11.lnk');
   const options = { target: process.execPath, appUserModelId: APP_ID, toastActivatorClsid: TOAST_ACTIVATOR_CLSID };
   if (!shell.writeShortcutLink(shortcut, fs.existsSync(shortcut) ? 'update' : 'create', options)) {

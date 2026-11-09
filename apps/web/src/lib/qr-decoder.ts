@@ -17,6 +17,19 @@ export function decodeIndependently(image: RawImage): string | null {
   return jsQR(image.data, image.width, image.height, { inversionAttempts: 'attemptBoth' })?.data ?? null;
 }
 
+/** The second decoder's reading, with the code's location. It copes better with very small codes. */
+export function locateIndependently(image: RawImage): Detection | null {
+  const found = jsQR(image.data, image.width, image.height, { inversionAttempts: 'attemptBoth' });
+  if (!found?.data) return null;
+  const { topLeftCorner, topRightCorner, bottomRightCorner, bottomLeftCorner } = found.location;
+  return {
+    text: found.data,
+    corners: [topLeftCorner, topRightCorner, bottomRightCorner, bottomLeftCorner],
+    inverted: false,
+    modules: 17 + 4 * found.version,
+  };
+}
+
 /** Reads every QR code in an image. `thorough` is slower but finds damaged and noisy ones. */
 export async function decodeQrCodes(image: RawImage, thorough = false): Promise<Detection[]> {
   const imageData = new ImageData(new Uint8ClampedArray(image.data), image.width, image.height);
