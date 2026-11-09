@@ -128,7 +128,9 @@ export function createRelay(options: RelayOptions): Relay {
     }
     const result = store.redeemCode(code, typeof deviceName === 'string' ? deviceName : 'Phone');
     if (!result) {
-      res.status(400).json({ error: 'That code is invalid or has expired. Generate a new one on your laptop.' });
+      res.status(400).json({
+        error: "That code didn't work here. It may have expired, or it may be for the other connection type. On your laptop, choose the tab matching this page (Over the internet or Same Wi-Fi) and show a new code.",
+      });
       return;
     }
     hub.notifyPhonePaired(result.phone);
