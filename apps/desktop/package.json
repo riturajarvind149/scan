@@ -1,6 +1,6 @@
 {
   "name": "@qr2win/desktop",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Receive QR codes scanned on your phone on your Windows 11 desktop.",
   "author": "QR-to-Windows-11",
@@ -32,6 +32,8 @@
   "build": {
     "appId": "com.qr2win.desktop",
     "productName": "QR-to-Windows-11",
+    "artifactName": "QR-to-Windows-11-Setup.${ext}",
+    "publish": null,
     "npmRebuild": false,
     "files": [
       "dist/**/*",

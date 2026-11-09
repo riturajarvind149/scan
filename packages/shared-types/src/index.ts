@@ -3,7 +3,6 @@
 
 // ─── Limits ────────────────────────────────────────────────────────────
 export const PAIRING_CODE_LENGTH = 6;
-export const LAPTOP_CODE_LENGTH = 8;
 export const PAIRING_CODE_EXPIRY_MS = 5 * 60 * 1000;
 export const MAX_IMAGE_PAYLOAD_BYTES = 5 * 1024 * 1024; // decoded image bytes
 export const MAX_IMAGE_BASE64_LENGTH = Math.ceil(MAX_IMAGE_PAYLOAD_BYTES / 3) * 4;
@@ -13,7 +12,12 @@ export const MAX_WS_MESSAGE_BYTES = MAX_IMAGE_BASE64_LENGTH + MAX_DECODED_TEXT_L
 export const MAX_IMAGE_DIMENSION = 4096;
 export const MAX_DEVICE_NAME_LENGTH = 64;
 export const MAX_PHONES_PER_DESKTOP = 20;
-export const MAX_REVOKE_BATCH = 200;
+export const MAX_LAPTOPS = 50;
+export const INVITE_VALID_MS = 7 * 24 * 60 * 60 * 1000;
+export const ADMIN_SESSION_MS = 12 * 60 * 60 * 1000;
+/** Limits for scans from a public link, across every sender and per IP address. */
+export const OPEN_SCANS_PER_MINUTE = 200;
+export const OPEN_CONNECTIONS_PER_IP = 20;
 export const ALLOWED_MIME_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const;
 export const RATE_LIMIT_SCANS_PER_MINUTE = 30;
 export const AUTH_TIMEOUT_MS = 10_000;
@@ -27,8 +31,6 @@ export type ImageMimeType = (typeof ALLOWED_MIME_TYPES)[number];
 export type ClientRole = 'phone' | 'desktop';
 
 // ─── REST bodies ───────────────────────────────────────────────────────
-export type PairingCodeKind = 'phone' | 'laptop';
-
 export interface PairingCode {
   code: string;
   expiresAt: number; // unix ms
@@ -44,6 +46,36 @@ export interface PairResponseBody {
   phoneId: string;
 }
 
+/** 'open': the phone link needs no pairing, and laptops join by invite. 'paired': a laptop's own Wi-Fi relay. */
+export type RelayMode = 'open' | 'paired';
+
+export interface RelayConfig {
+  mode: RelayMode;
+  adminEnabled: boolean;
+  downloadUrl: string | null;
+}
+
+export interface InviteSummary {
+  token: string;
+  expiresAt: number;
+}
+
+export interface LaptopSummary {
+  id: string;
+  name: string;
+  online: boolean;
+  createdAt: number;
+  lastSeenAt: number;
+}
+
+export interface AdminState {
+  laptops: LaptopSummary[];
+  invite: InviteSummary | null;
+  scansPaused: boolean;
+  phonesOnline: number;
+  storage: 'external' | 'local-disk';
+}
+
 export interface PhoneSummary {
   id: string;
   name: string;
@@ -54,7 +86,8 @@ export interface PhoneSummary {
 // ─── Client → relay ────────────────────────────────────────────────────
 export interface AuthMessage {
   type: 'auth';
-  token: string;
+  /** Omitted by a phone using the public link of a relay that allows it. */
+  token?: string;
 }
 
 export interface QrImagePayload {
@@ -76,17 +109,11 @@ export interface QrAck {
   scanId: string;
 }
 
-/** Desktop → relay: phones removed on this laptop. A relay restarted on an empty disk relearns them here. */
-export interface RevokePhones {
-  type: 'revoke-phones';
-  phoneIds: string[];
-}
-
 export interface PingMessage {
   type: 'ping';
 }
 
-export type ClientMessage = AuthMessage | QrImagePayload | QrAck | RevokePhones | PingMessage;
+export type ClientMessage = AuthMessage | QrImagePayload | QrAck | PingMessage;
 
 // ─── Relay → client ────────────────────────────────────────────────────
 export interface AuthResult {
@@ -109,9 +136,10 @@ export interface PhonePaired {
   phone: PhoneSummary;
 }
 
-/** Sent to desktops when another laptop joins their account. */
+/** Sent to desktops when another laptop joins. */
 export interface LaptopJoined {
   type: 'laptop-joined';
+  name: string;
 }
 
 /** The scan was not forwarded because the desktop is offline; the phone keeps it and retries. */
@@ -130,6 +158,7 @@ export type ErrorCode =
   | 'INVALID_PAYLOAD'
   | 'INVALID_ROLE'
   | 'RATE_LIMIT'
+  | 'SCANS_PAUSED'
   | 'UNKNOWN_TYPE';
 
 export interface ErrorMessage {
@@ -196,6 +225,26 @@ export function validateQrPayload(p: unknown): string | null {
     return 'Image data does not match its MIME type';
   }
   return null;
+}
+
+// ─── Laptop invite links ───────────────────────────────────────────────
+const INVITE_PATH_PATTERN = /^\/join\/([A-Za-z0-9_.-]{20,1024})\/?$/;
+
+/** Parses an invite link, including its qr2win:// form that opens the desktop app. */
+export function parseInviteLink(text: string): { origin: string; token: string } | null {
+  let url: URL;
+  try {
+    url = new URL(text.trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol === 'qr2win:') {
+    const inner = url.searchParams.get('url');
+    return inner && !inner.startsWith('qr2win:') ? parseInviteLink(inner) : null;
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+  const token = INVITE_PATH_PATTERN.exec(url.pathname)?.[1];
+  return token ? { origin: url.origin, token } : null;
 }
 
 // ─── Pairing links ─────────────────────────────────────────────────────

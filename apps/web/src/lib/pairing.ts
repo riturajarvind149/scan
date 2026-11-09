@@ -1,4 +1,4 @@
-import type { PairResponseBody } from '@qr2win/shared-types';
+import type { PairResponseBody, RelayConfig } from '@qr2win/shared-types';
 
 const STORAGE_KEY = 'qr2win.pairing';
 
@@ -11,6 +11,12 @@ export interface Pairing {
 export const SERVER_ORIGIN: string = (import.meta.env.VITE_SERVER_URL as string | undefined) || window.location.origin;
 
 export const WS_URL = `${SERVER_ORIGIN.replace(/^http/, 'ws')}/ws`;
+
+export async function fetchConfig(): Promise<RelayConfig> {
+  const response = await fetch(`${SERVER_ORIGIN}/api/config`);
+  if (!response.ok) throw new Error(`Config request failed (${response.status})`);
+  return (await response.json()) as RelayConfig;
+}
 
 export function loadPairing(): Pairing | null {
   try {

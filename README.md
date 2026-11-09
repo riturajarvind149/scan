@@ -12,17 +12,17 @@ Scan any QR code with your phone and see that exact image on your Windows 11 lap
        └───────────────► relay server ──────────────────────┘
 ```
 
-The phone needs no app, only a browser. The laptop needs the desktop app. **For daily use, deploy the relay once.** You then pair each device once, and from then on opening your link goes straight to the camera, on any network. Same-Wi-Fi mode needs no server, but usually needs pairing again on each new network.
+The phone needs no app or pairing: anyone with your relay's link opens it and scans, and every laptop on the relay receives the scan. Laptops need the desktop app and join once with an invite link from the admin dashboard at `/admin`. Same-Wi-Fi mode needs no server, and is the one case that still pairs a phone with a code.
 
 ## Use it
 
-1. Install and open the desktop app. It waits in the system tray and starts receiving over Wi-Fi by itself.
-2. Choose **Show pairing code** and scan the QR with your phone's normal camera. The scanner opens in your browser and pairs without any typing.
-3. Point the phone at any QR code. A Windows notification appears; click it to see the code in a floating window that stays on top until you close it.
+1. In the dashboard at `https://your-relay/admin`, choose **Create invite link** and open that link on each laptop. It offers the installer and then joins the laptop to the relay.
+2. On any phone, open `https://your-relay` and allow the camera. Bookmark it.
+3. Point the phone at any QR code. A Windows notification appears on every laptop; click it to see the code in a floating window that stays on top until you close it.
 
-The phone stays paired. Next time, just reopen the page.
+The dashboard lists the laptops, removes them, cancels the invite link, and can pause scanning.
 
-**More laptops:** install the app on the other laptop, then in the first one choose **Show code for another laptop**, and enter that 8-digit code under **Or join another laptop's account**. Every scan then reaches all of them.
+**Same Wi-Fi instead of a relay:** in the app choose **Same Wi-Fi**, then **Show pairing code**, and scan it with your phone's normal camera.
 
 **First time on Wi-Fi:** the phone warns that the connection isn't private, because your laptop isn't a public website with a purchased certificate. Choose **Advanced**, then **Proceed**. Traffic is still encrypted. Windows also asks whether to allow the app through the firewall; allow it for the type of network you're on.
 
@@ -77,13 +77,16 @@ docker run -p 3001:3001 -v qr-relay-data:/data -e TRUST_PROXY=1 -e RELAY_SECRET=
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `3001` | Port to listen on |
-| `RELAY_SECRET` | generated and kept in `DATA_DIR` | Signs every credential, at least 32 characters. Set it on any host that wipes its disk, and never change it: that makes every device pair again |
-| `DATA_DIR` | `apps/server/data`, `/data` in Docker | Where device names and removed phones are saved. Optional when `RELAY_SECRET` is set |
+| `RELAY_SECRET` | generated and kept in `DATA_DIR` | Signs every credential, at least 32 characters. Set it on any host that wipes its disk, and never change it: that signs out every laptop |
+| `ADMIN_PASSWORD` | none | Password for `/admin`, at least 8 characters. Without it the dashboard stays off, and no new laptops can join |
+| `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | none | Keeps the laptop list and removals across restarts on hosts that wipe their disk. A [free Upstash database](https://upstash.com) needs no card |
+| `DESKTOP_DOWNLOAD_URL` | this repository's latest release | Installer link on the invite page |
+| `DATA_DIR` | `apps/server/data`, `/data` in Docker | Where records are saved on disk |
 | `TRUST_PROXY` | `0` | Reverse proxies in front of the server. Set to `1` on hosted platforms, or all visitors share one rate limit |
 | `CORS_ORIGINS` | none | Extra origins allowed to call the API, if you host the phone app elsewhere (build it with `VITE_SERVER_URL`) |
 | `WEB_ROOT` | `apps/web/dist` | Location of the built phone app |
 
-Then paste your relay's `https://` address under **Settings** in the desktop app, or set it as `qr2win.defaultRelayUrl` in `apps/desktop/package.json` before building, so every install connects with no setup. Check it with `https://your-relay/health`.
+Set `qr2win.defaultRelayUrl` in `apps/desktop/package.json` before building, so every install knows its relay. Check the relay with `https://your-relay/health`. Pushing a tag such as `v1.1.0` publishes the installer as a GitHub release, which is where the invite page's download button points.
 
 It runs as a single instance, because live connections are held in that process.
 
@@ -103,10 +106,12 @@ It runs as a single instance, because live connections are held in that process.
 
 ## Security
 
-- **Pairing:** 6-digit codes are single use, expire in 5 minutes, and are rate limited to 10 attempts per minute per IP address. The laptop announces every new phone and can remove any of them, which cuts its connection immediately.
-- **Credentials:** a connection's role comes from its credential and can't be claimed. Credentials are signed with HMAC-SHA-256 using `RELAY_SECRET` and aren't stored on the relay, so they survive a restart on an empty disk. The laptop encrypts its credential with Windows DPAPI. On the phone it is in the site's local storage.
-- **Removing devices:** a removed phone is refused immediately, and laptops remember it and re-send the removal when they reconnect, because a relay on free hosting forgets after a restart. Between such a restart and the laptop reconnecting, a removed phone could connect, but with no laptop online its scans go nowhere. Laptops can't be removed individually yet; changing `RELAY_SECRET` signs out everything, and every device then pairs once again.
-- **New laptops:** joining uses a separate 8-digit single-use code, and existing laptops get a notification.
+- **The public phone link:** anyone who has your relay's link can send images to your laptops, so treat it like a private address. Senders are limited to 30 scans a minute per IP address and 200 a minute overall, and the dashboard can pause scanning. Search engines are asked not to index it.
+- **Laptops:** only an invite link or an existing credential gets a laptop on the relay. Invites last 7 days, work for several laptops until cancelled, and every join notifies the other laptops. A laptop removed from the dashboard is cut off immediately.
+- **Dashboard:** protected by `ADMIN_PASSWORD`, with 5 sign-in attempts a minute per IP address and sessions that end after 12 hours.
+- **Same-Wi-Fi pairing:** 6-digit codes are single use, expire in 5 minutes, and are rate limited to 10 attempts per minute per IP address.
+- **Credentials:** a connection's role comes from its credential and can't be claimed. Credentials are signed with HMAC-SHA-256 using `RELAY_SECRET` and aren't stored on the relay, so they survive a restart on an empty disk. The laptop encrypts its credential with Windows DPAPI.
+- **Removals need storage:** without Upstash on a host that wipes its disk, a removed laptop's credential works again after a restart. The dashboard warns about this.
 - **Transport:** internet relays must use HTTPS. Plain HTTP is accepted only on this PC or private networks.
 - **Untrusted input:** every scan is validated on the relay and again on the desktop, including checking that the bytes really are the stated image type. Scanned text is shown as plain text and is never opened or turned into a link. Scans are rate limited to 30 per minute per phone.
 - **Desktop app:** pages run sandboxed under a strict content security policy, and the popup has no access to app controls. Same-Wi-Fi mode listens on your network while enabled; turn it off under Settings if you only use the relay.
@@ -119,6 +124,5 @@ The relay passes images through without storing them, but the relay operator cou
 - **Image fidelity:** it's a photo of the code, so glare, angle and focus carry over. The crop is a straight rectangle, not perspective-corrected.
 - **iPhone on same-Wi-Fi:** Safari has historically been strict about secure WebSockets with self-signed certificates. If the page loads but never connects, use internet mode.
 - **Changed networks (same-Wi-Fi mode only):** a new network usually means a new laptop address, and browsers treat that as a different site, so the phone pairs again there. Internet mode has no such issue.
-- **Clearing browser data on the phone** removes its pairing, so it would pair once more.
 - **Free hosting:** the first request after the relay has been idle can take about a minute. Render's free plan also has a monthly hours limit.
 - **Background scanning:** browsers pause the camera when the page isn't visible.

@@ -207,12 +207,15 @@ async function main() {
   writeCameraVideo(video);
 
   const RELAY_SECRET = 'e2e-secret-e2e-secret-e2e-secret-e2e-secret';
+  const ADMIN_PASSWORD = 'e2e-admin-password';
   const port = await freePort();
   const relayUrl = `http://localhost:${port}`;
-  const relay = spawn(process.execPath, [path.join(ROOT, 'apps', 'server', 'dist', 'index.js')], {
-    env: { ...process.env, PORT: String(port), DATA_DIR: path.join(WORK, 'relay-data'), RELAY_SECRET },
-    stdio: 'ignore',
-  });
+  const startRelay = (dataDir) =>
+    spawn(process.execPath, [path.join(ROOT, 'apps', 'server', 'dist', 'index.js')], {
+      env: { ...process.env, PORT: String(port), DATA_DIR: path.join(WORK, dataDir), RELAY_SECRET, ADMIN_PASSWORD },
+      stdio: 'ignore',
+    });
+  const relay = startRelay('relay-data');
   await until('relay health check', async () => (await fetch(`${relayUrl}/health`)).ok);
   ok('the built relay server starts and answers /health');
 
@@ -235,7 +238,7 @@ async function main() {
   };
 
   try {
-    // ── Local Wi-Fi ───────────────────────────────────────────────────
+    // â”€â”€ Local Wi-Fi â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     console.log('Local Wi-Fi mode');
     await until('Wi-Fi server running', async () => (await page.textContent('#localStatus')).includes('ready'));
     ok('the Wi-Fi server starts by itself with the app');
@@ -256,7 +259,7 @@ async function main() {
     assert.equal(await localPhone.evaluate(() => window.isSecureContext), true);
     ok('the phone page is a secure context, so the camera is allowed');
 
-    await until('phone listed on desktop', async () => (await page.textContent('#phones')).includes('Wi-Fi'));
+    await until('phone listed on desktop', async () => (await page.textContent('#phones')).includes('Phone'));
     await until('pairing QR hidden after success', () => page.isHidden('#pairing'));
     ok('the desktop lists the phone and clears the pairing code');
 
@@ -283,8 +286,41 @@ async function main() {
     ok('removing the phone on the desktop disconnects it for good');
     await localContext.close();
 
-    // ── Internet ──────────────────────────────────────────────────────
-    console.log('Internet mode');
+    // â”€â”€ Admin dashboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    console.log('Admin dashboard');
+    const adminContext = await browser.newContext({ viewport: { width: 900, height: 900 } });
+    const admin = await adminContext.newPage();
+    watchPhone(admin);
+    await admin.goto(`${relayUrl}/admin`);
+    await admin.fill('input[type=password]', 'wrong-password');
+    await admin.click('button[type=submit]');
+    await admin.waitForSelector('[role=alert]');
+    assert.match(await admin.textContent('[role=alert]'), /Wrong password/);
+    await admin.fill('input[type=password]', ADMIN_PASSWORD);
+    await admin.click('button[type=submit]');
+    await admin.waitForSelector('text=Create invite link');
+    ok('the dashboard refuses a wrong password and opens with the right one');
+
+    await admin.click('text=Create invite link');
+    await admin.waitForSelector('#invite-link');
+    const inviteLink = await admin.textContent('#invite-link');
+    ok('the dashboard creates a laptop invite link');
+    await admin.screenshot({ path: path.join(OUTPUT, 'admin-dashboard.png') });
+
+    const joinContext = await browser.newContext({ viewport: { width: 900, height: 900 } });
+    const joinPage = await joinContext.newPage();
+    watchPhone(joinPage);
+    await joinPage.goto(inviteLink);
+    await joinPage.waitForSelector('text=Open in the app and join');
+    assert.match(await joinPage.getAttribute('a.button:not(.secondary)', 'href'), /^qr2win:\/\/join\?url=/);
+    await joinPage.screenshot({ path: path.join(OUTPUT, 'join-page.png') });
+    await joinPage.goto(`${relayUrl}/join/not-a-real-invite-token-at-all`);
+    await joinPage.waitForSelector("text=This invite isn't valid");
+    await joinContext.close();
+    ok('the invite page offers install and join, and rejects a fake invite');
+
+    // â”€â”€ First laptop joins â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    console.log('Laptops');
     await page.fill('#serverUrl', 'http://relay.example.com');
     await page.click('#saveServer');
     await until('rejecting plain http', async () => (await page.textContent('#serverError')).includes('https'));
@@ -292,34 +328,98 @@ async function main() {
 
     await page.fill('#serverUrl', relayUrl);
     await page.click('#saveServer');
-    await until('connected to relay', async () => (await page.textContent('#internetStatus')).includes('ready'));
-    ok('the desktop registers itself with the relay and connects');
+    await until('waiting for an invite', async () => (await page.textContent('#internetStatus')).includes('not joined'));
+    ok('without an invite, a laptop cannot connect to the relay');
 
+    await page.fill('#inviteLink', `${relayUrl}/join/forged-invite-token-that-means-nothing`);
+    await page.click('#joinRelay');
+    await until('fake invite refused', async () => (await page.textContent('#laptopError')).includes('invite'));
+    ok('a fake invite link is refused');
+
+    await page.fill('#inviteLink', inviteLink);
+    await page.click('#joinRelay');
+    await until('joined the relay', async () => (await page.textContent('#internetStatus')).includes('ready'));
+    await until('first laptop on the dashboard', async () => (await admin.textContent('.laptops')).includes('Online'));
+    ok('the invite link joins the laptop, and it shows as online on the dashboard');
+
+    const secureFile = fs.readFileSync(path.join(userData, 'settings.json'), 'utf-8');
+    const stored = JSON.parse(secureFile).internetCredential.encryptedToken;
+    assert.ok(stored && !stored.includes('.'));
+    ok('the relay credential is stored encrypted');
+
+    // â”€â”€ Phones scan with no pairing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    console.log('Phones with no pairing');
     await page.click('#tabInternet');
-    const internetLink = await readPairingLink(page);
-    assert.ok(internetLink.url.startsWith(`${relayUrl}/#pair=`));
+    await page.click('#showPairing');
+    await page.waitForSelector('#pairing:not([hidden])');
+    assert.equal(decodeDataUrl(await page.getAttribute('#pairingQr', 'src')).text, relayUrl);
+    assert.equal(await page.isVisible('#pairingCode'), false);
+    ok('the app shows a plain QR of the link, with no code');
 
-    const internetContext = await browser.newContext(IPHONE_SIZED);
-    const internetPhone = await internetContext.newPage();
+    const phoneOneContext = await browser.newContext(IPHONE_SIZED);
+    const internetPhone = await phoneOneContext.newPage();
     watchPhone(internetPhone);
-
-    // Typing the code by hand is the other way to pair.
     await internetPhone.goto(relayUrl);
-    await internetPhone.fill('input[inputmode=numeric]', '000000');
-    await internetPhone.fill('input[inputmode=numeric]', internetLink.code);
-    await internetPhone.click('button[type=submit]');
-    await until('phone paired with a typed code', async () => (await internetPhone.textContent('.pill').catch(() => '')).includes('Laptop connected'));
-    ok('typing the 6-digit code pairs the phone through the relay');
+    await until('phone connected with no pairing', async () => (await internetPhone.textContent('.pill').catch(() => '')).includes('Laptop connected'));
+    assert.equal(await internetPhone.isVisible('.pairing'), false);
+    assert.equal(await internetPhone.isVisible('text=Unpair'), false);
+    ok('opening the link goes straight to the camera, with no pairing screen');
 
     await verifyScanCycle(electronApp, page, internetPhone, 'internet', true);
 
-    // ── Laptop goes away and comes back ───────────────────────────────
-    console.log('Reconnection');
-    const secureFile = fs.readFileSync(path.join(userData, 'settings.json'), 'utf-8');
-    const stored = JSON.parse(secureFile).internetCredential.encryptedToken;
-    assert.ok(stored && !/^[0-9a-f]{64}$/.test(stored));
-    ok('the relay credential is stored encrypted');
+    // â”€â”€ Several laptops and several phones â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    console.log('Several laptops and phones');
+    const second = await launchDesktop(path.join(WORK, 'second-laptop-data'));
+    await second.page.fill('#serverUrl', relayUrl);
+    await second.page.click('#saveServer');
+    await until('second laptop waiting', async () => (await second.page.textContent('#internetStatus')).includes('not joined'));
+    await second.page.fill('#inviteLink', inviteLink);
+    await second.page.click('#joinRelay');
+    await until('second laptop joined', async () => (await second.page.textContent('#internetStatus')).includes('ready'));
+    await until('two laptops on the dashboard', async () => (await admin.$$('.laptops li')).length === 2);
+    ok('a second laptop joins with the same link');
 
+    const phoneTwoContext = await browser.newContext(IPHONE_SIZED);
+    const phoneTwo = await phoneTwoContext.newPage();
+    watchPhone(phoneTwo);
+    await phoneTwo.goto(relayUrl);
+    await until('second phone connected', async () => (await phoneTwo.textContent('.pill').catch(() => '')).includes('Laptop connected'));
+
+    const secondBefore = await notificationCount(second.electronApp);
+    const firstBefore = await notificationCount(electronApp);
+    await until('both laptops receive scans', async () =>
+      (await notificationCount(second.electronApp)) > secondBefore && (await notificationCount(electronApp)) > firstBefore, 30_000);
+    const senders = await Promise.all([internetPhone, phoneTwo].map((phone) => phone.textContent('.scan-result strong')));
+    assert.ok(senders.every((text) => text.includes('On your laptop')), `both phones must report delivery: ${senders}`);
+    ok('scans from two phones reach both laptops');
+
+    // Pausing stops scans, and resuming restarts them.
+    await admin.click('text=Pause scanning');
+    await until('phone told scanning is paused', async () => (await phoneTwo.textContent('.scan-result strong')).includes('paused'), 30_000);
+    await admin.click('text=Resume scanning');
+    ok('pausing in the dashboard stops phones from sending');
+
+    // Removing a laptop cuts it off at once and for good.
+    await admin.bringToFront();
+    admin.once('dialog', (dialog) => dialog.accept());
+    await admin.click('.laptops li:last-child button');
+    await until('second laptop told it was removed', async () => (await second.page.textContent('#joinHint')).includes('removed'));
+    assert.equal(JSON.parse(fs.readFileSync(path.join(WORK, 'second-laptop-data', 'settings.json'), 'utf-8')).internetCredential, null);
+    await until('one laptop left on the dashboard', async () => (await admin.$$('.laptops li')).length === 1);
+    ok('removing a laptop on the dashboard cuts it off and clears its credential');
+
+    await admin.click('text=Cancel link');
+    await admin.waitForSelector('text=Create invite link');
+    await second.page.fill('#inviteLink', inviteLink);
+    await second.page.click('#joinRelay');
+    await until('cancelled invite refused', async () => (await second.page.textContent('#laptopError')).includes('invite'));
+    ok('a cancelled invite link no longer works');
+    await second.electronApp.evaluate(({ app }) => app.quit());
+    await second.electronApp.waitForEvent('close').catch(() => undefined);
+    await phoneTwoContext.close();
+
+    // â”€â”€ Laptop goes away and comes back â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    console.log('Reconnection');
     await electronApp.evaluate(({ app }) => app.quit());
     await electronApp.waitForEvent('close').catch(() => undefined);
     await until('phone notices laptop is gone', async () => (await internetPhone.textContent('.pill')).includes('Laptop offline'));
@@ -327,7 +427,7 @@ async function main() {
 
     await until('a scan made offline is held', async () => (await internetPhone.textContent('.scan-result strong')).includes('Waiting for your laptop'), 20_000);
     await internetPhone.screenshot({ path: path.join(OUTPUT, 'phone-laptop-offline.png') });
-    ok('a QR scanned while the laptop is away waits instead of being lost');
+    ok('a QR scanned while no laptop is online waits instead of being lost');
 
     ({ electronApp, page, problems } = await launchDesktop(userData));
     await until('reconnected to relay after restart', async () => (await page.textContent('#internetStatus')).includes('ready'));
@@ -335,62 +435,25 @@ async function main() {
     await until('held scan delivered', async () => (await notificationCount(electronApp)) > 0, 20_000);
     ok('after restarting, the desktop reconnects unattended and the held scan arrives');
 
-    await until('paired phone remembered', async () => (await page.textContent('#phones')).includes('Internet'));
-    ok('pairings survive a desktop restart');
-
-    // ── A second laptop ───────────────────────────────────────────────
-    console.log('Several laptops');
-    await page.click('#showLaptopCode');
-    await page.waitForSelector('#laptopCodeBox:not([hidden])');
-    const laptopCode = await page.textContent('#laptopCode');
-    assert.match(laptopCode, /^\d{8}$/);
-
-    const second = await launchDesktop(path.join(WORK, 'second-laptop-data'));
-    await second.page.fill('#serverUrl', relayUrl);
-    await second.page.click('#saveServer');
-    await until('second laptop connects', async () => (await second.page.textContent('#internetStatus')).includes('ready'));
-    await second.page.fill('#joinCode', laptopCode);
-    await second.page.click('#joinAccount');
-    await until('second laptop joined', async () => (await second.page.textContent('#laptopSuccess')).includes('Joined'));
-    await until('second laptop connected to the account', async () => (await second.page.textContent('#phones')).includes('Internet'));
-    ok('a second laptop joins the account once, with a code');
-
-    const secondBefore = await notificationCount(second.electronApp);
-    const firstBefore = await notificationCount(electronApp);
-    await until('both laptops receive a scan', async () =>
-      (await notificationCount(second.electronApp)) > secondBefore && (await notificationCount(electronApp)) > firstBefore, 30_000);
-    ok('a scan from one phone reaches both laptops');
-    await second.electronApp.evaluate(({ app }) => app.quit());
-    await second.electronApp.waitForEvent('close').catch(() => undefined);
-
-    // ── Free hosting: the relay restarts and its disk is gone ─────────
+    // â”€â”€ Free hosting: the relay restarts and its disk is gone â”€â”€â”€â”€â”€â”€â”€â”€â”€
     console.log('Free-tier restart');
+    await adminContext.close();
     relay.kill();
     fs.rmSync(path.join(WORK, 'relay-data'), { recursive: true, force: true });
     await until('phone notices relay is gone', async () => (await internetPhone.textContent('.pill')).includes('Reconnecting'));
-    const relayAgain = spawn(process.execPath, [path.join(ROOT, 'apps', 'server', 'dist', 'index.js')], {
-      env: { ...process.env, PORT: String(port), DATA_DIR: path.join(WORK, 'relay-data-empty'), RELAY_SECRET },
-      stdio: 'ignore',
-    });
+    const relayAgain = startRelay('relay-data-empty');
     try {
       await until('both reconnect after relay restart', async () =>
         (await internetPhone.textContent('.pill')).includes('Laptop connected') &&
         (await page.textContent('#internetStatus')).includes('ready'), 45_000);
-      ok('after a relay restart with an empty disk, phone and desktop reconnect with no re-pairing');
-      await until('phone listed again after restart', async () => (await page.textContent('#phones')).includes('Internet'));
+      ok('after a relay restart with an empty disk, phone and laptop reconnect with no setup');
       const held = await notificationCount(electronApp);
       await until('scans still flow after restart', async () => (await notificationCount(electronApp)) > held, 30_000);
       ok('scans keep flowing after that restart');
-
-      await page.click('#phones li:has-text("Internet") button');
-      await until('phone removed', () => internetPhone.isVisible('.pairing'));
-      const removed = JSON.parse(fs.readFileSync(path.join(userData, 'settings.json'), 'utf-8')).removedPhones;
-      assert.equal(removed.length, 1);
-      ok('the laptop remembers a removed phone, to re-block it after any later restart');
     } finally {
       relayAgain.kill();
     }
-    await internetContext.close();
+    await phoneOneContext.close();
 
     assert.deepEqual(problems, [], 'the desktop window must log no errors');
     assert.deepEqual(phoneProblems, [], 'the phone page must log no errors');

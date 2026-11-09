@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildPairingUrl, parsePairingHash, parsePairingUrl, validateQrPayload, type QrImagePayload } from './index.js';
+import { buildPairingUrl, parseInviteLink, parsePairingHash, parsePairingUrl, validateQrPayload, type QrImagePayload } from './index.js';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==';
 const valid: QrImagePayload = {
@@ -31,6 +31,23 @@ describe('validateQrPayload', () => {
   ])('rejects %s', (_name, payload) => {
     expect(validateQrPayload(payload)).not.toBeNull();
   });
+});
+
+describe('invite links', () => {
+  const token = 'abcdefghijklmnopqrstuvwxyz.ABCDEFG-_';
+  const link = `https://relay.example.com/join/${token}`;
+
+  it('reads the web link and the link that opens the app', () => {
+    expect(parseInviteLink(link)).toEqual({ origin: 'https://relay.example.com', token });
+    expect(parseInviteLink(`qr2win://join?url=${encodeURIComponent(link)}`)).toEqual({ origin: 'https://relay.example.com', token });
+  });
+
+  it.each(['hello', 'https://relay.example.com/', 'https://relay.example.com/join/short', 'ftp://x.test/join/abcdefghijklmnopqrstuvwxyz', 'qr2win://join?url=javascript:alert(1)', 'qr2win://join'])(
+    'rejects %s',
+    (text) => {
+      expect(parseInviteLink(text)).toBeNull();
+    },
+  );
 });
 
 describe('pairing links', () => {

@@ -14,7 +14,7 @@
   </header>
 
   <section>
-    <h2>Add a phone</h2>
+    <h2>Scan from a phone</h2>
     <div class="tabs" role="tablist">
       <button type="button" role="tab" id="tabLocal" aria-selected="true">Same Wi-Fi</button>
       <button type="button" role="tab" id="tabInternet" aria-selected="false">Over the internet</button>
@@ -26,12 +26,12 @@
     </div>
 
     <p class="hint" id="pairHint"></p>
-    <button type="button" class="primary" id="showPairing">Show pairing code</button>
+    <button type="button" class="primary" id="showPairing">Show link for phones</button>
 
     <div id="pairing" hidden>
       <img id="pairingQr" alt="Pairing QR code. Scan it with your phone's camera." />
       <p class="code" id="pairingCode"></p>
-      <p class="hint center">Scan with your phone's camera, or open <strong id="pairingUrl" class="url"></strong> and type the code.</p>
+      <p class="hint center" id="pairingInstructions"><span id="pairingLead"></span> <strong id="pairingUrl" class="url"></strong> <span id="pairingTrail"></span></p>
       <p class="hint center" id="pairingExpiry"></p>
       <p class="hint" id="certHint" hidden>Your phone will warn that the connection isn't private, because this PC isn't a public website. Choose <strong>Advanced</strong>, then <strong>Proceed</strong>. If the page never loads, allow this app in Windows Firewall (on this network's type: Public or Private). Campus and office Wi-Fi often block devices from reaching each other; on those, use <strong>Over the internet</strong>.</p>
     </div>
@@ -40,9 +40,9 @@
   </section>
 
   <section>
-    <h2>Paired phones</h2>
+    <h2>Phones paired over Wi-Fi</h2>
     <ul class="list" id="phones"></ul>
-    <p class="hint" id="noPhones">No phones yet.</p>
+    <p class="hint" id="noPhones">None paired. Only the Same Wi-Fi option uses pairing; over the internet, phones just open the link.</p>
   </section>
 
   <section>
@@ -52,20 +52,16 @@
   </section>
 
   <section id="laptopsSection">
-    <h2>Your other laptops</h2>
-    <p class="hint">Every laptop on your account receives each scan. Add each one once, using the internet relay.</p>
-    <button type="button" id="showLaptopCode">Show code for another laptop</button>
-    <div id="laptopCodeBox" hidden>
-      <p class="code" id="laptopCode"></p>
-      <p class="hint center">Type this into the app on your other laptop. It works once and expires in 5 minutes.</p>
-    </div>
+    <h2>This laptop</h2>
+    <p class="hint" id="joinHint"></p>
     <div class="field" id="joinRow">
-      <label for="joinCode">Or join another laptop's account</label>
+      <label for="inviteLink">Invite link</label>
       <div class="inline">
-        <input type="text" id="joinCode" inputmode="numeric" maxlength="8" placeholder="8-digit code" autocomplete="off" />
-        <button type="button" id="joinAccount">Join</button>
+        <input type="text" id="inviteLink" placeholder="https://your-relay/join/..." spellcheck="false" autocomplete="off" />
+        <button type="button" id="joinRelay">Join</button>
       </div>
     </div>
+    <button type="button" id="openAdmin">Open admin dashboard</button>
     <p class="error" id="laptopError" role="alert" hidden></p>
     <p class="success" id="laptopSuccess" role="status" hidden></p>
   </section>

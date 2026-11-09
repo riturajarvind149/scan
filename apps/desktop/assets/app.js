@@ -13,6 +13,7 @@ const STATUS_TEXT = {
   connecting: 'connecting…',
   connected: 'ready',
   error: 'problem',
+  'needs-invite': 'not joined',
 };
 
 function element(tag, text, className) {
@@ -42,17 +43,17 @@ function renderPairHint() {
       ? `The Wi-Fi server couldn't start: ${local.error}`
       : 'Your phone and this PC must be on the same Wi-Fi. No internet or account needed.';
     $('showPairing').disabled = false;
+    $('showPairing').textContent = 'Show pairing code';
     return;
   }
+  $('showPairing').textContent = 'Show link for phones';
+  $('showPairing').disabled = !internet.serverUrl;
   if (!internet.serverUrl) {
     $('pairHint').textContent = 'Set your internet relay address under Settings first.';
-    $('showPairing').disabled = true;
   } else if (internet.unreachableByPhones) {
     $('pairHint').textContent = `${internet.serverUrl} only exists on this PC, so a phone can't reach it. Use a deployed relay.`;
-    $('showPairing').disabled = false;
   } else {
-    $('pairHint').textContent = `Uses your relay at ${internet.serverUrl}.`;
-    $('showPairing').disabled = false;
+    $('pairHint').textContent = 'Any phone can open this link and scan, with no pairing. Every laptop on the relay receives the scans.';
   }
 }
 
@@ -71,10 +72,7 @@ function renderAddresses() {
 }
 
 function renderPhones() {
-  const phones = [
-    ...state.local.phones.map((phone) => ({ ...phone, mode: 'local', via: 'Wi-Fi' })),
-    ...state.internet.phones.map((phone) => ({ ...phone, mode: 'internet', via: 'Internet' })),
-  ];
+  const phones = state.local.phones;
   $('noPhones').hidden = phones.length > 0;
   $('phones').replaceChildren(...phones.map((phone) => {
     const row = element('li');
@@ -86,13 +84,13 @@ function renderPhones() {
     remove.addEventListener('click', async () => {
       remove.disabled = true;
       try {
-        await api.unpairPhone(phone.mode, phone.id);
+        await api.unpairPhone(phone.id);
       } catch (err) {
         remove.disabled = false;
         show('pairError', cleanError(err));
       }
     });
-    row.append(dot, element('span', phone.name, 'grow'), element('span', phone.via, 'meta'), remove);
+    row.append(dot, element('span', phone.name, 'grow'), remove);
     return row;
   }));
 }
@@ -117,7 +115,7 @@ function render(next) {
   // Once a relay is set, it is what daily use goes through.
   if (firstRender && state.internet.serverUrl) selectTab('internet');
   firstRender = false;
-  $('laptopsSection').hidden = !state.internet.serverUrl;
+  renderJoin();
   renderStatus('localStatus', 'Wi-Fi', state.local);
   renderStatus('internetStatus', 'Internet', state.internet);
   renderPairHint();
@@ -128,7 +126,18 @@ function render(next) {
   $('startWithWindows').checked = state.startWithWindows;
   $('autoStartRow').hidden = !state.canAutoStart;
   if (document.activeElement !== $('serverUrl')) $('serverUrl').value = state.internet.serverUrl;
-  show('serverError', state.internet.status !== 'connected' && state.internet.serverUrl ? state.internet.error : '');
+  const serverProblem = state.internet.status === 'connecting' && state.internet.serverUrl;
+  show('serverError', serverProblem ? state.internet.error : '');
+}
+
+function renderJoin() {
+  const { status, error, serverUrl } = state.internet;
+  const joined = status === 'connected' || status === 'connecting';
+  $('joinRow').hidden = joined;
+  $('openAdmin').hidden = !serverUrl;
+  if (error && status === 'needs-invite') $('joinHint').textContent = error;
+  else if (joined) $('joinHint').textContent = 'This laptop receives every scan sent to your relay. Add or remove laptops in the admin dashboard.';
+  else $('joinHint').textContent = 'To receive scans, paste an invite link from your admin dashboard.';
 }
 
 function cleanError(err) {
@@ -172,13 +181,19 @@ async function showPairing() {
   show('pairError', '');
   show('pairSuccess', '');
   try {
-    const pairing = await api.createPairing(mode, $('address').value || undefined);
+    const isLocal = mode === 'local';
+    const pairing = isLocal ? await api.createPairing($('address').value || undefined) : await api.phoneLinkQr();
     $('pairingQr').src = pairing.qrDataUrl;
-    $('pairingCode').textContent = pairing.code;
+    $('pairingCode').textContent = isLocal ? pairing.code : '';
+    $('pairingCode').hidden = !isLocal;
+    $('pairingExpiry').hidden = !isLocal;
+    $('pairingLead').textContent = isLocal ? "Scan with your phone's camera, or open" : "Scan with any phone's camera, or open";
+    $('pairingTrail').textContent = isLocal ? 'and type the code.' : '';
     $('pairingUrl').textContent = new URL(pairing.url).origin;
-    $('certHint').hidden = mode !== 'local';
+    $('certHint').hidden = !isLocal;
     $('pairing').hidden = false;
-    startCountdown(pairing.expiresAt);
+    if (isLocal) startCountdown(pairing.expiresAt);
+    else clearInterval(expiryTimer);
   } catch (err) {
     hidePairing();
     show('pairError', cleanError(err));
@@ -206,29 +221,19 @@ $('saveServer').addEventListener('click', async () => {
   }
 });
 
-$('showLaptopCode').addEventListener('click', async () => {
+$('joinRelay').addEventListener('click', async () => {
   show('laptopError', '');
   show('laptopSuccess', '');
   try {
-    const { code } = await api.createLaptopCode();
-    $('laptopCode').textContent = code;
-    $('laptopCodeBox').hidden = false;
+    await api.joinWithInvite($('inviteLink').value);
+    $('inviteLink').value = '';
+    show('laptopSuccess', 'Joined. This laptop now receives scans.');
   } catch (err) {
     show('laptopError', cleanError(err));
   }
 });
 
-$('joinAccount').addEventListener('click', async () => {
-  show('laptopError', '');
-  show('laptopSuccess', '');
-  try {
-    await api.joinAccount($('joinCode').value);
-    $('joinCode').value = '';
-    show('laptopSuccess', 'Joined. This laptop now receives your scans.');
-  } catch (err) {
-    show('laptopError', cleanError(err));
-  }
-});
+$('openAdmin').addEventListener('click', () => api.openAdmin());
 
 api.onState(render);
 api.onPhonePaired((phone) => {

@@ -1,8 +1,10 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   Menu,
   nativeImage,
@@ -14,7 +16,7 @@ import {
   type IpcMainInvokeEvent,
 } from 'electron';
 import QRCode from 'qrcode';
-import type { PhoneSummary } from '@qr2win/shared-types';
+import { parseInviteLink, type PhoneSummary } from '@qr2win/shared-types';
 import type { ChannelEvents, ChannelMode } from './channel';
 import { InternetChannel } from './internet-channel';
 import { LocalChannel } from './local-channel';
@@ -26,6 +28,7 @@ const APP_ID = 'com.qr2win.desktop';
 /** Fixed for this app: Windows looks it up from the shortcut, so it must not change between runs. */
 const TOAST_ACTIVATOR_CLSID = '{7E0C6A52-3B1F-4D8E-9A61-2F4C8B7D1E93}';
 const START_HIDDEN_ARG = '--hidden';
+const PROTOCOL = 'qr2win';
 
 // An explicit data directory lets several isolated instances run, which the end-to-end test needs.
 const userDataOverride = app.commandLine.getSwitchValue('user-data-dir');
@@ -139,32 +142,67 @@ function handle<A extends unknown[], R>(channel: string, handler: (...args: A) =
   });
 }
 
-function assertMode(mode: unknown): asserts mode is ChannelMode {
-  if (mode !== 'local' && mode !== 'internet') throw new Error('Unknown connection mode');
+function qrImage(text: string): Promise<string> {
+  return QRCode.toDataURL(text, { width: 280, margin: 2, errorCorrectionLevel: 'M' });
+}
+
+async function joinWithInvite(link: string): Promise<void> {
+  const invite = parseInviteLink(link);
+  if (!invite) throw new Error("That isn't an invite link. It should look like https://your-relay/join/...");
+  await internet.joinWithInvite(normalizeServerUrl(invite.origin), invite.token, os.hostname());
+}
+
+/** Handles a qr2win:// link. Any website can open one, so it always asks before joining a relay. */
+async function handleDeepLink(link: string): Promise<void> {
+  const invite = parseInviteLink(link);
+  if (!invite) return;
+  showMainWindow();
+  const { response } = await dialog.showMessageBox({
+    type: 'question',
+    title: 'Join this relay?',
+    message: `Receive scanned QR codes from ${new URL(invite.origin).host}?`,
+    detail: 'Only continue if you asked for this invite. Images sent through this relay will appear as notifications on this PC.',
+    buttons: ['Join', 'Cancel'],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (response !== 0) return;
+  try {
+    await joinWithInvite(link);
+  } catch (err) {
+    dialog.showErrorBox("Couldn't join", (err as Error).message);
+  }
+}
+
+function deepLinkIn(argv: string[]): string | undefined {
+  return argv.find((arg) => arg.startsWith(`${PROTOCOL}://`));
 }
 
 function setupIpc(): void {
   handle('get-state', buildState);
 
-  handle('create-pairing', async (mode: ChannelMode, address?: string) => {
-    assertMode(mode);
-    const pairing = mode === 'local' ? await local.createPairing(address) : await internet.createPairing();
-    const qrDataUrl = await QRCode.toDataURL(pairing.url, { width: 280, margin: 2, errorCorrectionLevel: 'M' });
-    return { ...pairing, qrDataUrl, mode };
+  handle('create-pairing', async (address?: string) => {
+    const pairing = await local.createPairing(address);
+    return { ...pairing, qrDataUrl: await qrImage(pairing.url) };
   });
 
-  handle('create-laptop-code', () => internet.createLaptopCode());
-
-  handle('join-account', async (code: string) => {
-    if (typeof code !== 'string' || !/^\d{8}$/.test(code.trim())) throw new Error('Enter the 8-digit code from your other laptop.');
-    await internet.joinAccount(code.trim());
+  /** The public phone link: any phone can open it, so there is no code. */
+  handle('phone-link-qr', async () => {
+    if (!settings.serverUrl) throw new Error('Set your relay address first.');
+    return { url: settings.serverUrl, qrDataUrl: await qrImage(settings.serverUrl) };
   });
 
-  handle('unpair-phone', async (mode: ChannelMode, phoneId: string) => {
-    assertMode(mode);
+  handle('join-with-invite', async (link: string) => {
+    await joinWithInvite(typeof link === 'string' ? link : '');
+  });
+
+  handle('open-admin', () => {
+    if (settings.serverUrl) void shell.openExternal(`${settings.serverUrl}/admin`);
+  });
+
+  handle('unpair-phone', (phoneId: string) => {
     if (typeof phoneId !== 'string') throw new Error('Invalid phone');
-    if (mode === 'local') local.unpair(phoneId);
-    else await internet.unpair(phoneId);
+    local.unpair(phoneId);
   });
 
   handle('set-server-url', (input: string) => {
@@ -225,11 +263,11 @@ function registerToastShortcut(): void {
   }
 }
 
-function onLaptopJoined(): void {
+function onLaptopJoined(name: string): void {
   if (!Notification.isSupported()) return;
   new Notification({
     title: 'New laptop added',
-    body: "Another laptop now receives your scans too. If this wasn't you, change your relay's RELAY_SECRET.",
+    body: `${name} now receives your scans too. If you didn't expect this, remove it in the admin dashboard.`,
     icon: assetPath('icon.ico'),
   }).show();
 }
@@ -259,6 +297,11 @@ function start(): void {
   if (settings.localEnabled) void local.start();
   internet.start();
 
+  // Test instances have an explicit data folder and must not take over this machine's links.
+  if (app.isPackaged && !userDataOverride) app.setAsDefaultProtocolClient(PROTOCOL);
+  const startupLink = deepLinkIn(process.argv);
+  if (startupLink) void handleDeepLink(startupLink);
+
   powerMonitor.on('resume', () => internet.reconnectNow());
 }
 
@@ -269,7 +312,11 @@ if (!app.requestSingleInstanceLock()) {
   app.setAppUserModelId(app.isPackaged ? APP_ID : process.execPath);
   app.setToastActivatorCLSID(TOAST_ACTIVATOR_CLSID);
 
-  app.on('second-instance', showMainWindow);
+  app.on('second-instance', (_event, argv) => {
+    showMainWindow();
+    const link = deepLinkIn(argv);
+    if (link) void handleDeepLink(link);
+  });
   app.whenReady().then(start).catch((err) => {
     console.error('[desktop] Failed to start:', err);
     app.exit(1);

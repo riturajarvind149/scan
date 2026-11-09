@@ -11,8 +11,6 @@ interface StoredSettings {
   localPort: number;
   /** The relay credential, encrypted with the Windows user's key (DPAPI). */
   internetCredential: { desktopId: string; encryptedToken: string } | null;
-  /** Phones removed from this laptop, re-sent to a relay that may have restarted with an empty disk. */
-  removedPhones: string[];
   /** Whether "start with Windows" got its on-by-default value, which is only done once. */
   autoStartInitialized: boolean;
 }
@@ -22,11 +20,8 @@ const DEFAULTS: StoredSettings = {
   localEnabled: true,
   localPort: 3002,
   internetCredential: null,
-  removedPhones: [],
   autoStartInitialized: false,
 };
-
-const MAX_REMEMBERED_REMOVALS = 200;
 
 export interface InternetCredential {
   desktopId: string;
@@ -78,15 +73,6 @@ export class SettingsStore {
 
   set localPort(port: number) {
     this.data.localPort = port;
-    this.save();
-  }
-
-  get removedPhones(): string[] {
-    return this.data.removedPhones;
-  }
-
-  addRemovedPhone(phoneId: string): void {
-    this.data.removedPhones = [...this.data.removedPhones, phoneId].slice(-MAX_REMEMBERED_REMOVALS);
     this.save();
   }
 

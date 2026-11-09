@@ -1,6 +1,6 @@
 # One-click deploy of the internet relay on Render: https://render.com/docs/blueprint-spec
-# Runs on the free plan. Its disk is wiped on restart, which is fine: RELAY_SECRET keeps every device's
-# credential valid, and laptops re-send the phones you removed when they reconnect.
+# Runs on the free plan. Its disk is wiped on restart: RELAY_SECRET keeps every credential valid, and
+# Upstash (free, set up separately) keeps the laptop list and removals.
 # The instance sleeps when idle, so the first request after a quiet spell can take about a minute.
 services:
   - type: web
@@ -14,3 +14,9 @@ services:
         value: "1"
       - key: RELAY_SECRET
         generateValue: true
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false

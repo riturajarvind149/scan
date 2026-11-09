@@ -8,10 +8,11 @@ function subscribe(channel: string, callback: (data: unknown) => void): () => vo
 
 contextBridge.exposeInMainWorld('app', {
   getState: () => ipcRenderer.invoke('get-state'),
-  createPairing: (mode: string, address?: string) => ipcRenderer.invoke('create-pairing', mode, address),
-  createLaptopCode: () => ipcRenderer.invoke('create-laptop-code'),
-  joinAccount: (code: string) => ipcRenderer.invoke('join-account', code),
-  unpairPhone: (mode: string, phoneId: string) => ipcRenderer.invoke('unpair-phone', mode, phoneId),
+  createPairing: (address?: string) => ipcRenderer.invoke('create-pairing', address),
+  phoneLinkQr: () => ipcRenderer.invoke('phone-link-qr'),
+  joinWithInvite: (link: string) => ipcRenderer.invoke('join-with-invite', link),
+  openAdmin: () => ipcRenderer.invoke('open-admin'),
+  unpairPhone: (phoneId: string) => ipcRenderer.invoke('unpair-phone', phoneId),
   setServerUrl: (url: string) => ipcRenderer.invoke('set-server-url', url),
   setLocalEnabled: (enabled: boolean) => ipcRenderer.invoke('set-local-enabled', enabled),
   setStartWithWindows: (enabled: boolean) => ipcRenderer.invoke('set-start-with-windows', enabled),

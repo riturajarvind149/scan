@@ -179,7 +179,7 @@ export class LocalChannel {
 
     const store = new PairingStore(path.join(userData, 'local-pairings.json'));
     this.desktopId = store.ensureLocalDesktop();
-    const { app: expressApp, hub } = createRelay({ store, webRoot: webRoot(), allowDesktopRegistration: false });
+    const { app: expressApp, hub } = createRelay({ store, webRoot: webRoot(), mode: 'paired' });
     const server = https.createServer({ key: certificate.key, cert: certificate.cert }, expressApp);
 
     // Attach only once bound: the WebSocket server rethrows the listen errors that bind() retries on.
