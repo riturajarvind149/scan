@@ -200,10 +200,11 @@ async function main() {
   const video = path.join(WORK, 'camera.y4m');
   writeCameraVideo(video);
 
+  const RELAY_SECRET = 'e2e-secret-e2e-secret-e2e-secret-e2e-secret';
   const port = await freePort();
   const relayUrl = `http://localhost:${port}`;
   const relay = spawn(process.execPath, [path.join(ROOT, 'apps', 'server', 'dist', 'index.js')], {
-    env: { ...process.env, PORT: String(port), DATA_DIR: path.join(WORK, 'relay-data') },
+    env: { ...process.env, PORT: String(port), DATA_DIR: path.join(WORK, 'relay-data'), RELAY_SECRET },
     stdio: 'ignore',
   });
   await until('relay health check', async () => (await fetch(`${relayUrl}/health`)).ok);
@@ -331,17 +332,55 @@ async function main() {
     await until('paired phone remembered', async () => (await page.textContent('#phones')).includes('Internet'));
     ok('pairings survive a desktop restart');
 
+    // ── A second laptop ───────────────────────────────────────────────
+    console.log('Several laptops');
+    await page.click('#showLaptopCode');
+    await page.waitForSelector('#laptopCodeBox:not([hidden])');
+    const laptopCode = await page.textContent('#laptopCode');
+    assert.match(laptopCode, /^\d{8}$/);
+
+    const second = await launchDesktop(path.join(WORK, 'second-laptop-data'));
+    await second.page.fill('#serverUrl', relayUrl);
+    await second.page.click('#saveServer');
+    await until('second laptop connects', async () => (await second.page.textContent('#internetStatus')).includes('ready'));
+    await second.page.fill('#joinCode', laptopCode);
+    await second.page.click('#joinAccount');
+    await until('second laptop joined', async () => (await second.page.textContent('#laptopSuccess')).includes('Joined'));
+    await until('second laptop connected to the account', async () => (await second.page.textContent('#phones')).includes('Internet'));
+    ok('a second laptop joins the account once, with a code');
+
+    const secondBefore = await notificationCount(second.electronApp);
+    const firstBefore = await notificationCount(electronApp);
+    await until('both laptops receive a scan', async () =>
+      (await notificationCount(second.electronApp)) > secondBefore && (await notificationCount(electronApp)) > firstBefore, 30_000);
+    ok('a scan from one phone reaches both laptops');
+    await second.electronApp.evaluate(({ app }) => app.quit());
+    await second.electronApp.waitForEvent('close').catch(() => undefined);
+
+    // ── Free hosting: the relay restarts and its disk is gone ─────────
+    console.log('Free-tier restart');
     relay.kill();
+    fs.rmSync(path.join(WORK, 'relay-data'), { recursive: true, force: true });
     await until('phone notices relay is gone', async () => (await internetPhone.textContent('.pill')).includes('Reconnecting'));
     const relayAgain = spawn(process.execPath, [path.join(ROOT, 'apps', 'server', 'dist', 'index.js')], {
-      env: { ...process.env, PORT: String(port), DATA_DIR: path.join(WORK, 'relay-data') },
+      env: { ...process.env, PORT: String(port), DATA_DIR: path.join(WORK, 'relay-data-empty'), RELAY_SECRET },
       stdio: 'ignore',
     });
     try {
       await until('both reconnect after relay restart', async () =>
         (await internetPhone.textContent('.pill')).includes('Laptop connected') &&
         (await page.textContent('#internetStatus')).includes('ready'), 45_000);
-      ok('after a relay restart, phone and desktop both reconnect with their pairing intact');
+      ok('after a relay restart with an empty disk, phone and desktop reconnect with no re-pairing');
+      await until('phone listed again after restart', async () => (await page.textContent('#phones')).includes('Internet'));
+      const held = await notificationCount(electronApp);
+      await until('scans still flow after restart', async () => (await notificationCount(electronApp)) > held, 30_000);
+      ok('scans keep flowing after that restart');
+
+      await page.click('#phones li:has-text("Internet") button');
+      await until('phone removed', () => internetPhone.isVisible('.pairing'));
+      const removed = JSON.parse(fs.readFileSync(path.join(userData, 'settings.json'), 'utf-8')).removedPhones;
+      assert.equal(removed.length, 1);
+      ok('the laptop remembers a removed phone, to re-block it after any later restart');
     } finally {
       relayAgain.kill();
     }

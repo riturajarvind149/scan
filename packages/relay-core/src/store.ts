@@ -2,23 +2,25 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  LAPTOP_CODE_LENGTH,
   MAX_DEVICE_NAME_LENGTH,
   MAX_PHONES_PER_DESKTOP,
   PAIRING_CODE_EXPIRY_MS,
   PAIRING_CODE_LENGTH,
   type ClientRole,
   type PairingCode,
+  type PairingCodeKind,
 } from '@qr2win/shared-types';
 
-const TOKEN_BYTES = 32;
 const SAVE_DEBOUNCE_MS = 500;
-/** Credentials unused for this long are forgotten, so an abandoned relay does not grow forever. */
+const GENERATED_SECRET_BYTES = 32;
+const MAX_REVOKED_PHONES = 5000;
+/** Records unused for this long are forgotten. Their credentials still work and recreate them. */
 const STALE_AFTER_MS = 180 * 24 * 60 * 60 * 1000;
 
 export interface PhoneRecord {
   id: string;
   desktopId: string;
-  tokenHash: string;
   name: string;
   createdAt: number;
   lastSeenAt: number;
@@ -26,56 +28,67 @@ export interface PhoneRecord {
 
 interface DesktopRecord {
   id: string;
-  tokenHash: string;
   createdAt: number;
   lastSeenAt: number;
 }
 
 interface Snapshot {
-  version: 1;
+  version: 2;
+  /** Only present when the secret was generated here rather than supplied by the operator. */
+  secret?: string;
   desktops: DesktopRecord[];
   phones: PhoneRecord[];
+  revokedPhones: string[];
 }
+
+type TokenClaims =
+  | { r: 'd'; d: string }
+  | { r: 'p'; d: string; p: string; n: string; c: number };
 
 export type Identity =
   | { role: Extract<ClientRole, 'desktop'>; desktopId: string }
   | { role: Extract<ClientRole, 'phone'>; desktopId: string; phoneId: string };
 
-function hashToken(token: string): string {
-  return crypto.createHash('sha256').update(token).digest('hex');
-}
-
-function newToken(): string {
-  return crypto.randomBytes(TOKEN_BYTES).toString('hex');
-}
-
 /**
  * Holds desktops, paired phones and live pairing codes.
  *
- * Only SHA-256 hashes of tokens are kept, so a leaked data file cannot be replayed. The role of a
- * connection comes from the token it presents; clients cannot claim one.
+ * Credentials are signed with the relay's secret rather than looked up, so they keep working when
+ * the relay restarts with an empty disk, as free hosting does. Nothing that could be replayed is
+ * written to the data file unless the relay generated its own secret. The role of a connection comes
+ * from the signed credential; clients cannot claim one.
  */
 export class PairingStore {
   private desktops = new Map<string, DesktopRecord>();
   private phones = new Map<string, PhoneRecord>();
-  private desktopIdByHash = new Map<string, string>();
-  private phoneIdByHash = new Map<string, string>();
-  private codes = new Map<string, { desktopId: string; expiresAt: number }>();
+  private revokedPhones = new Set<string>();
+  private codes = new Map<string, { desktopId: string; expiresAt: number; kind: PairingCodeKind }>();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private secret: string;
+  private readonly secretSupplied: boolean;
 
-  /** @param dataFile JSON file to persist pairings in; omit to keep them in memory only. */
-  constructor(private readonly dataFile?: string) {
+  /**
+   * @param dataFile JSON file to persist records in; omit to keep them in memory only.
+   * @param secret Signing secret. Without one, a secret is generated and kept in the data file.
+   */
+  constructor(
+    private readonly dataFile?: string,
+    secret?: string,
+  ) {
+    this.secretSupplied = !!secret;
+    this.secret = secret ?? '';
     if (dataFile) this.load(dataFile);
+    if (!this.secret) {
+      this.secret = crypto.randomBytes(GENERATED_SECRET_BYTES).toString('hex');
+      this.scheduleSave();
+    }
   }
 
   registerDesktop(): { desktopId: string; token: string } {
-    const token = newToken();
     const now = Date.now();
-    const record: DesktopRecord = { id: crypto.randomUUID(), tokenHash: hashToken(token), createdAt: now, lastSeenAt: now };
-    this.desktops.set(record.id, record);
-    this.desktopIdByHash.set(record.tokenHash, record.id);
+    const desktopId = crypto.randomUUID();
+    this.desktops.set(desktopId, { id: desktopId, createdAt: now, lastSeenAt: now });
     this.scheduleSave();
-    return { desktopId: record.id, token };
+    return { desktopId, token: this.sign({ r: 'd', d: desktopId }) };
   }
 
   /** Creates the single desktop of an embedded local relay if needed and returns its id. */
@@ -85,67 +98,68 @@ export class PairingStore {
     return this.registerDesktop().desktopId;
   }
 
-  /** Issues a code for the desktop, replacing any code it still has outstanding. */
-  issueCode(desktopId: string): PairingCode {
+  /** Issues a code for the desktop, replacing any outstanding code of the same kind. */
+  issueCode(desktopId: string, kind: PairingCodeKind = 'phone'): PairingCode {
     if (!this.desktops.has(desktopId)) throw new Error('Unknown desktop');
     const now = Date.now();
     for (const [code, entry] of this.codes) {
-      if (entry.desktopId === desktopId || entry.expiresAt <= now) this.codes.delete(code);
+      if ((entry.desktopId === desktopId && entry.kind === kind) || entry.expiresAt <= now) this.codes.delete(code);
     }
+    // A laptop code can read every future scan, so it is longer than a phone code.
+    const length = kind === 'laptop' ? LAPTOP_CODE_LENGTH : PAIRING_CODE_LENGTH;
     let code: string;
     do {
-      code = crypto.randomInt(0, 10 ** PAIRING_CODE_LENGTH).toString().padStart(PAIRING_CODE_LENGTH, '0');
+      code = crypto.randomInt(0, 10 ** length).toString().padStart(length, '0');
     } while (this.codes.has(code));
     const expiresAt = now + PAIRING_CODE_EXPIRY_MS;
-    this.codes.set(code, { desktopId, expiresAt });
+    this.codes.set(code, { desktopId, expiresAt, kind });
     return { code, expiresAt };
   }
 
-  /** Exchanges a pairing code for a phone credential. The code is single use. */
+  /** Exchanges a phone code for a phone credential. The code is single use. */
   redeemCode(code: string, deviceName: string): { token: string; phone: PhoneRecord } | null {
-    const entry = this.codes.get(code);
-    if (!entry) return null;
-    this.codes.delete(code);
-    const now = Date.now();
-    if (entry.expiresAt <= now || !this.desktops.has(entry.desktopId)) return null;
-    if (this.listPhones(entry.desktopId).length >= MAX_PHONES_PER_DESKTOP) return null;
+    const desktopId = this.takeCode(code, 'phone');
+    if (!desktopId || this.listPhones(desktopId).length >= MAX_PHONES_PER_DESKTOP) return null;
 
-    const token = newToken();
+    const now = Date.now();
     const phone: PhoneRecord = {
       id: crypto.randomUUID(),
-      desktopId: entry.desktopId,
-      tokenHash: hashToken(token),
+      desktopId,
       name: sanitizeName(deviceName),
       createdAt: now,
       lastSeenAt: now,
     };
     this.phones.set(phone.id, phone);
-    this.phoneIdByHash.set(phone.tokenHash, phone.id);
     this.scheduleSave();
-    return { token, phone };
+    return { token: this.sign({ r: 'p', d: desktopId, p: phone.id, n: phone.name, c: now }), phone };
+  }
+
+  /** Exchanges a laptop code for a credential on the same account. The code is single use. */
+  redeemLaptopCode(code: string): { token: string; desktopId: string } | null {
+    const desktopId = this.takeCode(code, 'laptop');
+    return desktopId ? { token: this.sign({ r: 'd', d: desktopId }), desktopId } : null;
   }
 
   authenticate(token: unknown): Identity | null {
-    if (typeof token !== 'string' || token.length === 0 || token.length > 256) return null;
-    const hash = hashToken(token);
+    const claims = this.verify(token);
+    if (!claims) return null;
     const now = Date.now();
 
-    const desktopId = this.desktopIdByHash.get(hash);
-    const desktop = desktopId ? this.desktops.get(desktopId) : undefined;
-    if (desktop) {
-      desktop.lastSeenAt = now;
+    if (claims.r === 'd') {
+      const desktop = this.desktops.get(claims.d);
+      if (desktop) desktop.lastSeenAt = now;
+      else this.desktops.set(claims.d, { id: claims.d, createdAt: now, lastSeenAt: now });
       this.scheduleSave();
-      return { role: 'desktop', desktopId: desktop.id };
+      return { role: 'desktop', desktopId: claims.d };
     }
 
-    const phoneId = this.phoneIdByHash.get(hash);
-    const phone = phoneId ? this.phones.get(phoneId) : undefined;
-    if (phone) {
-      phone.lastSeenAt = now;
-      this.scheduleSave();
-      return { role: 'phone', desktopId: phone.desktopId, phoneId: phone.id };
-    }
-    return null;
+    if (this.revokedPhones.has(revocationKey(claims.d, claims.p))) return null;
+    if (!this.desktops.has(claims.d)) this.desktops.set(claims.d, { id: claims.d, createdAt: now, lastSeenAt: now });
+    const phone = this.phones.get(claims.p);
+    if (phone) phone.lastSeenAt = now;
+    else this.phones.set(claims.p, { id: claims.p, desktopId: claims.d, name: claims.n, createdAt: claims.c, lastSeenAt: now });
+    this.scheduleSave();
+    return { role: 'phone', desktopId: claims.d, phoneId: claims.p };
   }
 
   listPhones(desktopId: string): PhoneRecord[] {
@@ -156,13 +170,15 @@ export class PairingStore {
     return this.phones.get(phoneId) ?? null;
   }
 
-  removePhone(phoneId: string): boolean {
+  /** Permanently refuses a phone's credential, whether or not this relay has seen it since restarting. */
+  revokePhone(desktopId: string, phoneId: string): void {
     const phone = this.phones.get(phoneId);
-    if (!phone) return false;
-    this.phones.delete(phoneId);
-    this.phoneIdByHash.delete(phone.tokenHash);
+    if (phone?.desktopId === desktopId) this.phones.delete(phoneId);
+    this.revokedPhones.add(revocationKey(desktopId, phoneId));
+    if (this.revokedPhones.size > MAX_REVOKED_PHONES) {
+      this.revokedPhones.delete(this.revokedPhones.values().next().value as string);
+    }
     this.scheduleSave();
-    return true;
   }
 
   /** Writes any pending change to disk immediately. Call before shutting down. */
@@ -174,27 +190,55 @@ export class PairingStore {
     }
   }
 
-  private load(dataFile: string): void {
-    let snapshot: Snapshot;
+  private takeCode(code: string, kind: PairingCodeKind): string | null {
+    const entry = this.codes.get(code);
+    if (!entry || entry.kind !== kind) return null;
+    this.codes.delete(code);
+    return entry.expiresAt > Date.now() && this.desktops.has(entry.desktopId) ? entry.desktopId : null;
+  }
+
+  private sign(claims: TokenClaims): string {
+    const payload = Buffer.from(JSON.stringify(claims)).toString('base64url');
+    return `${payload}.${this.signature(payload)}`;
+  }
+
+  private signature(payload: string): string {
+    return crypto.createHmac('sha256', this.secret).update(payload).digest('base64url');
+  }
+
+  private verify(token: unknown): TokenClaims | null {
+    if (typeof token !== 'string' || token.length === 0 || token.length > 1024) return null;
+    const [payload, signature, extra] = token.split('.');
+    if (!payload || !signature || extra !== undefined) return null;
+    const expected = Buffer.from(this.signature(payload));
+    const actual = Buffer.from(signature);
+    if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) return null;
     try {
-      snapshot = JSON.parse(fs.readFileSync(dataFile, 'utf-8')) as Snapshot;
+      return JSON.parse(Buffer.from(payload, 'base64url').toString('utf-8')) as TokenClaims;
+    } catch {
+      return null;
+    }
+  }
+
+  private load(dataFile: string): void {
+    let snapshot: Partial<Snapshot>;
+    try {
+      snapshot = JSON.parse(fs.readFileSync(dataFile, 'utf-8')) as Partial<Snapshot>;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
         console.error(`[relay] Could not read ${dataFile}; starting with no pairings:`, (err as Error).message);
       }
       return;
     }
+    if (!this.secret && snapshot.secret) this.secret = snapshot.secret;
     const cutoff = Date.now() - STALE_AFTER_MS;
     for (const desktop of snapshot.desktops ?? []) {
-      if (desktop.lastSeenAt < cutoff) continue;
-      this.desktops.set(desktop.id, desktop);
-      this.desktopIdByHash.set(desktop.tokenHash, desktop.id);
+      if (desktop.lastSeenAt >= cutoff) this.desktops.set(desktop.id, desktop);
     }
     for (const phone of snapshot.phones ?? []) {
-      if (phone.lastSeenAt < cutoff || !this.desktops.has(phone.desktopId)) continue;
-      this.phones.set(phone.id, phone);
-      this.phoneIdByHash.set(phone.tokenHash, phone.id);
+      if (phone.lastSeenAt >= cutoff && this.desktops.has(phone.desktopId)) this.phones.set(phone.id, phone);
     }
+    this.revokedPhones = new Set(snapshot.revokedPhones ?? []);
   }
 
   private scheduleSave(): void {
@@ -209,9 +253,11 @@ export class PairingStore {
   private save(): void {
     if (!this.dataFile) return;
     const snapshot: Snapshot = {
-      version: 1,
+      version: 2,
+      ...(this.secretSupplied ? {} : { secret: this.secret }),
       desktops: [...this.desktops.values()],
       phones: [...this.phones.values()],
+      revokedPhones: [...this.revokedPhones],
     };
     try {
       fs.mkdirSync(path.dirname(this.dataFile), { recursive: true });
@@ -222,6 +268,10 @@ export class PairingStore {
       console.error('[relay] Failed to persist pairings:', (err as Error).message);
     }
   }
+}
+
+function revocationKey(desktopId: string, phoneId: string): string {
+  return `${desktopId}:${phoneId}`;
 }
 
 function sanitizeName(name: string): string {

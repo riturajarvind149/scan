@@ -86,10 +86,26 @@ export class InternetChannel {
     return { ...pairing, url: buildPairingUrl(this.settings.serverUrl, pairing.code) };
   }
 
+  /** A code that lets another laptop join this account, so scans reach both. */
+  async createLaptopCode(): Promise<PairingCode> {
+    if (!this.settings.serverUrl) throw new Error('Set your relay address first.');
+    const credential = await this.ensureCredential();
+    return this.request<PairingCode>('/api/pairing/generate', { method: 'POST', token: credential.token, body: { kind: 'laptop' } });
+  }
+
+  /** Joins this laptop to the account of the laptop that showed the code. */
+  async joinAccount(code: string): Promise<void> {
+    if (!this.settings.serverUrl) throw new Error('Set your relay address first.');
+    const joined = await this.request<RegisterDesktopResponse>('/api/desktops/join', { method: 'POST', body: { code } });
+    this.settings.setCredential({ desktopId: joined.desktopId, token: joined.token });
+    this.start();
+  }
+
   async unpair(phoneId: string): Promise<void> {
     const credential = this.settings.getCredential();
     if (!credential) throw new Error('Not registered with the relay.');
     await this.request(`/api/phones/${encodeURIComponent(phoneId)}`, { method: 'DELETE', token: credential.token });
+    this.settings.addRemovedPhone(phoneId);
   }
 
   private async connect(generation: number): Promise<void> {
@@ -117,6 +133,10 @@ export class InternetChannel {
       }
       if (message.type === 'auth-result') {
         if (message.success) {
+          // Sent first: a relay that restarted on an empty disk has forgotten these phones.
+          if (this.settings.removedPhones.length > 0) {
+            ws.send(JSON.stringify({ type: 'revoke-phones', phoneIds: this.settings.removedPhones }));
+          }
           this.attempts = 0;
           this.error = null;
           this.setStatus('connected');
@@ -166,7 +186,7 @@ export class InternetChannel {
     return credential;
   }
 
-  private async request<T = unknown>(pathname: string, options: { method: string; token?: string }): Promise<T> {
+  private async request<T = unknown>(pathname: string, options: { method: string; token?: string; body?: unknown }): Promise<T> {
     let response: Response;
     try {
       response = await fetch(`${this.settings.serverUrl}${pathname}`, {
@@ -175,7 +195,7 @@ export class InternetChannel {
           'Content-Type': 'application/json',
           ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
         },
-        body: options.method === 'POST' ? '{}' : undefined,
+        body: options.method === 'POST' ? JSON.stringify(options.body ?? {}) : undefined,
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (err) {

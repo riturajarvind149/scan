@@ -16,7 +16,7 @@ export interface RelayOptions {
   corsOrigins?: string[];
   /** Number of reverse proxies in front of this process. */
   trustProxy?: number;
-  /** A local relay serves exactly one embedded desktop, so remote desktops may not register. */
+  /** A local relay serves exactly one embedded desktop, so remote desktops may not register or join. */
   allowDesktopRegistration?: boolean;
 }
 
@@ -100,10 +100,24 @@ export function createRelay(options: RelayOptions): Relay {
       const body: RegisterDesktopResponse = store.registerDesktop();
       res.status(201).json(body);
     });
+
+    /** A further laptop joining an account, so scans reach all of them. */
+    app.post('/api/desktops/join', limitBy(pairLimiter), (req, res) => {
+      const code = req.body?.code;
+      const joined = typeof code === 'string' && /^\d{8}$/.test(code) ? store.redeemLaptopCode(code) : null;
+      if (!joined) {
+        res.status(400).json({ error: 'That code is invalid or has expired. Show a new one on your other laptop.' });
+        return;
+      }
+      hub.notifyLaptopJoined(joined.desktopId);
+      const body: RegisterDesktopResponse = joined;
+      res.json(body);
+    });
   }
 
-  app.post('/api/pairing/generate', requireDesktop, (_req, res) => {
-    res.json(store.issueCode((res.locals.identity as Identity).desktopId));
+  app.post('/api/pairing/generate', requireDesktop, (req, res) => {
+    const kind = req.body?.kind === 'laptop' && allowDesktopRegistration ? 'laptop' : 'phone';
+    res.json(store.issueCode((res.locals.identity as Identity).desktopId, kind));
   });
 
   app.post('/api/pairing/pair', limitBy(pairLimiter), (req, res) => {
@@ -125,7 +139,8 @@ export function createRelay(options: RelayOptions): Relay {
   /** A phone removing its own pairing. */
   app.post('/api/pairing/unpair', requireRole(store, 'phone'), (_req, res) => {
     const identity = res.locals.identity as Extract<Identity, { role: 'phone' }>;
-    res.json({ revoked: hub.revokePhone(identity.phoneId) });
+    hub.revokePhone(identity.desktopId, identity.phoneId);
+    res.json({ revoked: true });
   });
 
   app.get('/api/phones', requireDesktop, (_req, res) => {
@@ -133,12 +148,15 @@ export function createRelay(options: RelayOptions): Relay {
   });
 
   app.delete('/api/phones/:id', requireDesktop, (req, res) => {
+    const { desktopId } = res.locals.identity as Identity;
     const phone = store.getPhone(req.params.id);
-    if (!phone || phone.desktopId !== (res.locals.identity as Identity).desktopId) {
+    if (phone && phone.desktopId !== desktopId) {
       res.status(404).json({ error: 'No such phone' });
       return;
     }
-    res.json({ revoked: hub.revokePhone(phone.id) });
+    // Even if unseen since a relay restart, the id is revoked within this account only.
+    hub.revokePhone(desktopId, req.params.id);
+    res.json({ revoked: true });
   });
 
   app.use('/api', (_req, res) => {
