@@ -1,5 +1,6 @@
 import type { Point } from './capture';
 import type { Detection, EnhancedResult, RawImage } from './enhance';
+import type { ModuleGrid } from './rebuild';
 
 /** Runs decoding and enhancement off the main thread, so the camera preview never stutters. */
 export class ScannerClient {
@@ -30,15 +31,20 @@ export class ScannerClient {
     return this.call({ kind: 'enhance', image, text, corners }, image);
   }
 
+  /** A perfectly sharp copy from the squares a live reading saw. Needs no photo, so it is quick. */
+  crisp(grid: ModuleGrid, text: string, bytes?: Uint8Array): Promise<EnhancedResult | null> {
+    return this.call({ kind: 'crisp', grid, text, bytes });
+  }
+
   terminate(): void {
     this.worker.terminate();
   }
 
-  private call<T>(request: object, image: RawImage): Promise<T> {
+  private call<T>(request: object, image?: RawImage): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
       this.waiting.set(id, { resolve: resolve as (value: never) => void, reject });
-      this.worker.postMessage({ id, ...request }, [image.data.buffer]);
+      this.worker.postMessage({ id, ...request }, image ? [image.data.buffer] : []);
     });
   }
 }

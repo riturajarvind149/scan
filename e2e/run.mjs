@@ -36,8 +36,8 @@ function recordUploads() {
   WebSocket.prototype.send = function record(data) {
     try {
       const message = JSON.parse(data);
-      if (message.type === 'qr-image') window.uploads.push({ type: message.type, bytes: data.length, waitedMs: Date.now() - message.timestamp, hasEnhanced: !!message.enhanced, text: message.decodedText });
-      if (message.type === 'qr-enhanced') window.uploads.push({ type: message.type, bytes: data.length });
+      if (message.type === 'qr-image') window.uploads.push({ type: message.type, scanId: message.scanId, at: Date.now(), bytes: data.length, waitedMs: Date.now() - message.timestamp, hasEnhanced: !!message.enhanced, text: message.decodedText });
+      if (message.type === 'qr-enhanced') window.uploads.push({ type: message.type, scanId: message.scanId, at: Date.now(), bytes: data.length, method: message.enhanced?.method });
     } catch {
       // Not ours.
     }
@@ -544,6 +544,18 @@ async function main() {
     assert.ok(slowest < 150, `the scan should go out at once, waited ${slowest} ms`);
     assert.ok(updates.length > 0, 'clearer copies should follow');
     ok(`a scan leaves the phone within ${slowest} ms of detection, at ${kb(biggest)} KB or less; the clearer copy follows at ${kb(Math.max(...updates.map((u) => u.bytes)))} KB or less`);
+
+    // Codes that change every few seconds must reach the laptop clean and at once, so the crisp copy
+    // is rebuilt from the live reading rather than from a later photo.
+    const gaps = updates
+      .map((update) => update.at - (firstSends.find((send) => send.scanId === update.scanId)?.at ?? Infinity))
+      .filter(Number.isFinite)
+      .sort((a, b) => a - b);
+    const rebuilt = updates.filter((update) => update.method === 'rebuilt square for square from the scanned code');
+    assert.ok(rebuilt.length > 0, `clean copies should be rebuilt exactly, got: ${[...new Set(updates.map((u) => u.method))].join('; ')}`);
+    const typicalGap = gaps[Math.floor(gaps.length / 2)];
+    assert.ok(typicalGap < 400, `the clean copy should follow the photo at once, took ${typicalGap} ms`);
+    ok(`the clean copy follows the photo within ${typicalGap} ms typically (${rebuilt.length} of ${updates.length} rebuilt exactly, up to ${kb(Math.max(...rebuilt.map((u) => u.bytes)))} KB)`);
 
     // â”€â”€ Several laptops and several phones â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     console.log('Several laptops and phones');

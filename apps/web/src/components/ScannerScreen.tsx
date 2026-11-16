@@ -10,8 +10,9 @@ import { ScannerClient } from '../lib/scanner-client';
 /** A code still in view is not a new scan; it counts again only after this long out of view. */
 const SAME_CODE_COOLDOWN_MS = 3000;
 /**
- * How long after sending to keep looking for a sharper frame to straighten. The laptop waits briefly
- * for the straightened copy before showing its popup, so this stays short.
+ * How long after sending to keep looking for a sharper frame to straighten, when the code could not
+ * be rebuilt from a live reading. The laptop waits briefly for a clean copy before showing its popup,
+ * so this stays short.
  */
 const BEST_FRAME_WINDOW_MS = 150;
 /**
@@ -37,6 +38,8 @@ interface PendingCapture {
   text: string;
   /** Where the code is in `crop`. */
   corners: Point[];
+  /** The crisp copy from a live reading's squares, once asked for. True when it was sent. */
+  crisp?: Promise<boolean>;
 }
 
 function newScanId(): string {
@@ -98,12 +101,43 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
     };
   }, []);
 
+  /**
+   * Sends a perfectly sharp copy rebuilt from the squares the live scan read. It takes milliseconds,
+   * so the laptop shows it almost as soon as the photo, which matters for codes that change every few seconds.
+   */
+  const sendCrisp = useCallback(
+    (capture: PendingCapture, detection: Detection) => {
+      if (capture.crisp || !detection.grid || !enhancer.current) return;
+      capture.crisp = enhancer.current
+        .crisp(detection.grid, capture.text, detection.bytes)
+        .then((result) => {
+          const encoded = result && encodeRawImage(result.image);
+          if (!result || !encoded) return false;
+          client.addEnhancement(capture.scanId, {
+            mimeType: encoded.mimeType,
+            width: encoded.width,
+            height: encoded.height,
+            imageBase64: encoded.base64,
+            method: result.method,
+          });
+          return true;
+        })
+        .catch((err: Error) => {
+          console.warn('[scanner] Crisp copy skipped:', err.message);
+          return false;
+        });
+    },
+    [client],
+  );
+
   /** Makes the clearer copy on its own worker, so detection never pauses for it. */
   const enhanceInBackground = useCallback(
-    (text: string) => {
+    async (text: string) => {
       const capture = pending.current.get(text);
       if (!capture) return;
       pending.current.delete(text);
+      // Already sent, sharp and exact, from the live reading.
+      if (capture.crisp && (await capture.crisp)) return;
       if (!enhancer.current) return;
       void enhancer.current
         .enhance(readPixels(capture.crop), capture.text, capture.corners)
@@ -127,7 +161,8 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
     (detections: Detection[], frame: HTMLCanvasElement) => {
       if (frozenNow.current) return;
       const now = Date.now();
-      for (const { text, corners } of detections) {
+      for (const detection of detections) {
+        const { text, corners } = detection;
         const previous = lastSeen.current.get(text);
         const stillInView = previous !== undefined && now - previous < SAME_CODE_COOLDOWN_MS;
         lastSeen.current.set(text, now);
@@ -140,6 +175,8 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
         const score = sharpnessScore(readPixels(crop));
         const cornersInCrop = corners.map((point) => ({ x: point.x - region.x, y: point.y - region.y }));
         if (waiting) {
+          // The phone's own detector may have answered first; zxing's reading brings the squares.
+          sendCrisp(waiting, detection);
           // Already sent. Keep the sharpest view from the next few frames for the clearer copy.
           if (score > waiting.score) {
             waiting.crop = crop;
@@ -168,14 +205,16 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
           imageBase64: photo.base64,
           decodedText: text.slice(0, MAX_DECODED_TEXT_LENGTH),
         });
-        pending.current.set(text, { scanId, crop, score, text, corners: cornersInCrop });
-        setTimeout(() => enhanceInBackground(text), BEST_FRAME_WINDOW_MS);
+        const capture: PendingCapture = { scanId, crop, score, text, corners: cornersInCrop };
+        pending.current.set(text, capture);
+        sendCrisp(capture, detection);
+        setTimeout(() => void enhanceInBackground(text), BEST_FRAME_WINDOW_MS);
       }
       for (const [text, seenAt] of lastSeen.current) {
         if (now - seenAt > SAME_CODE_COOLDOWN_MS * 2) lastSeen.current.delete(text);
       }
     },
-    [client, enhanceInBackground],
+    [client, enhanceInBackground, sendCrisp],
   );
 
   useEffect(
@@ -188,7 +227,7 @@ export function ScannerScreen({ pairing, notice, onUnpair, onRevoked }: ScannerS
   /** Restarts the camera and forgets what was sent, so a code still in view counts as a new scan. */
   const rescan = () => {
     // A scan still choosing its sharpest frame finishes now, or it would absorb the new one.
-    for (const text of [...pending.current.keys()]) enhanceInBackground(text);
+    for (const text of [...pending.current.keys()]) void enhanceInBackground(text);
     lastSeen.current.clear();
     if (freezeTimer.current) clearTimeout(freezeTimer.current);
     freezeTimer.current = null;

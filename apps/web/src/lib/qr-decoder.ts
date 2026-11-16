@@ -1,6 +1,7 @@
 import jsQR from 'jsqr';
 import { readBarcodes, type ReaderOptions } from 'zxing-wasm/reader';
 import type { Detection, RawImage } from './enhance';
+import type { EcLevel, ModuleGrid } from './rebuild';
 
 const MAX_CODES_PER_IMAGE = 12;
 
@@ -30,6 +31,21 @@ export function locateIndependently(image: RawImage): Detection | null {
   };
 }
 
+/** The grid of squares zxing read, with the level and mask it found. Its symbol image has 0 for dark. */
+function gridOf(result: { symbol?: { data: Uint8ClampedArray; width: number; height: number }; extra?: string }): ModuleGrid | undefined {
+  const symbol = result.symbol;
+  if (!symbol || symbol.width < 21 || symbol.width !== symbol.height || symbol.data.length !== symbol.width * symbol.height) return undefined;
+  let extra: { ECLevel?: string; DataMask?: number } = {};
+  try {
+    extra = JSON.parse(result.extra || '{}') as typeof extra;
+  } catch {
+    // only the grid itself is needed
+  }
+  const ecLevel = ['L', 'M', 'Q', 'H'].includes(extra.ECLevel ?? '') ? (extra.ECLevel as EcLevel) : undefined;
+  const mask = Number.isInteger(extra.DataMask) && extra.DataMask! >= 0 && extra.DataMask! <= 7 ? extra.DataMask : undefined;
+  return { size: symbol.width, dark: Uint8Array.from(symbol.data, (value) => (value === 0 ? 1 : 0)), ecLevel, mask };
+}
+
 /** Reads every QR code in an image. `thorough` is slower but finds damaged and noisy ones. */
 export async function decodeQrCodes(image: RawImage, thorough = false): Promise<Detection[]> {
   const imageData = new ImageData(new Uint8ClampedArray(image.data), image.width, image.height);
@@ -44,6 +60,8 @@ export async function decodeQrCodes(image: RawImage, thorough = false): Promise<
         corners: [topLeft, topRight, bottomRight, bottomLeft],
         inverted: result.isInverted,
         modules: version > 0 ? 17 + 4 * version : undefined,
+        grid: gridOf(result),
+        bytes: result.bytes?.length ? new Uint8Array(result.bytes) : undefined,
       };
     });
 }

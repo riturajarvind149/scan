@@ -1,4 +1,5 @@
 import type { Point } from './capture';
+import { rebuildExact, renderModules, type ModuleGrid } from './rebuild';
 
 /** Pixels, as in ImageData but usable anywhere. */
 export interface RawImage {
@@ -14,6 +15,10 @@ export interface Detection {
   inverted: boolean;
   /** Modules across the code, when known. */
   modules?: number;
+  /** The squares the decoder read, when it says. Lets the code be rebuilt exactly. */
+  grid?: ModuleGrid;
+  /** The code's content as raw bytes, when known. */
+  bytes?: Uint8Array;
 }
 
 /** `thorough` is slower and reads damaged images; a clean result must not need it. */
@@ -355,6 +360,91 @@ export function sharpnessScore(image: RawImage): number {
   return count === 0 ? 0 : squares / count - (sum / count) ** 2;
 }
 
+/** Both decoders must read exactly the expected text, in their normal mode, and see only one code. */
+async function readsAs(image: RawImage, expectedText: string, decode: Decoder, independent: IndependentDecoder): Promise<boolean> {
+  const results = await decode(image, false);
+  return results.length === 1 && results[0].text === expectedText && independent(image) === expectedText;
+}
+
+/**
+ * A perfectly sharp copy drawn from the squares a decoder read. Preferably the code rebuilt exactly
+ * (see rebuild.ts); otherwise the squares just as they were read, which the code's error correction
+ * covers. Either way it is shown only if both decoders read it as the expected text.
+ */
+export async function crispCopy(
+  grid: ModuleGrid,
+  expectedText: string,
+  bytes: Uint8Array | undefined,
+  decode: Decoder,
+  independent: IndependentDecoder,
+): Promise<EnhancedResult | null> {
+  const exact = rebuildExact(grid, expectedText, bytes);
+  if (exact) {
+    const image = renderModules(exact.size, (row, col) => !!exact.get(row, col));
+    if (await readsAs(image, expectedText, decode, independent)) return { image, method: 'rebuilt square for square from the scanned code' };
+  }
+  const asRead = renderModules(grid.size, (row, col) => grid.dark[row * grid.size + col] === 1);
+  if (await readsAs(asRead, expectedText, decode, independent)) return { image: asRead, method: 'redrawn from the squares the scanner read' };
+  return null;
+}
+
+/**
+ * Reads the squares off a squared-up image, from the middle of each, where blur and shadows reach
+ * least. Only used to rebuild the code exactly, which proves or rejects the reading.
+ */
+export function sampleGrid(rectified: RawImage, modules: number, inverted: boolean): ModuleGrid {
+  const { data, width } = rectified;
+  const pitch = (width * (1 - 2 * QUIET_ZONE)) / modules;
+  const origin = width * QUIET_ZONE;
+  const reach = Math.max(0, Math.floor(pitch / 6));
+  const levels = new Float32Array(modules * modules);
+  for (let row = 0; row < modules; row++) {
+    for (let col = 0; col < modules; col++) {
+      const cx = Math.round(origin + (col + 0.5) * pitch);
+      const cy = Math.round(origin + (row + 0.5) * pitch);
+      let sum = 0;
+      let count = 0;
+      for (let y = cy - reach; y <= cy + reach; y++) {
+        for (let x = cx - reach; x <= cx + reach; x++) {
+          if (x < 0 || y < 0 || x >= width || y >= rectified.height) continue;
+          sum += luminance(data, (y * width + x) * 4);
+          count++;
+        }
+      }
+      levels[row * modules + col] = count ? sum / count : 255;
+    }
+  }
+  const threshold = otsu(levels);
+  const dark = Uint8Array.from(levels, (level) => ((level < threshold) !== inverted ? 1 : 0));
+  return { size: modules, dark };
+}
+
+/** The level that best splits values into two groups. */
+function otsu(values: Float32Array): number {
+  const histogram = new Float64Array(256);
+  for (const value of values) histogram[Math.max(0, Math.min(255, Math.round(value)))]++;
+  const total = values.length;
+  let sumAll = 0;
+  for (let level = 0; level < 256; level++) sumAll += level * histogram[level];
+  let below = 0;
+  let sumBelow = 0;
+  let best = 128;
+  let bestSpread = -1;
+  for (let level = 0; level < 256; level++) {
+    below += histogram[level];
+    if (below === 0 || below === total) continue;
+    sumBelow += level * histogram[level];
+    const meanBelow = sumBelow / below;
+    const meanAbove = (sumAll - sumBelow) / (total - below);
+    const spread = below * (total - below) * (meanBelow - meanAbove) ** 2;
+    if (spread > bestSpread) {
+      bestSpread = spread;
+      best = level + 0.5;
+    }
+  }
+  return best;
+}
+
 /**
  * Tries to produce a clearer image of the code. A result is returned only if two independent
  * decoders both read it, in their normal mode, as exactly the text of the original capture. So an
@@ -370,10 +460,21 @@ export async function enhanceVerified(
 ): Promise<EnhancedResult | null> {
   const found = await locateCode(crop, expectedText, decode, help);
   if (!found) return null;
+  if (found.grid) {
+    const crisp = await crispCopy(found.grid, expectedText, found.bytes, decode, independent);
+    if (crisp) return crisp;
+  }
 
   const rectified = rectify(crop, found.corners, found.inverted, found.modules);
   const neutral = removeColourCast(rectified);
   const evened = found.inverted ? neutral : flattenShading(neutral);
+  if (found.modules) {
+    const exact = rebuildExact(sampleGrid(evened, found.modules, found.inverted), expectedText);
+    if (exact) {
+      const image = renderModules(exact.size, (row, col) => !!exact.get(row, col));
+      if (await readsAs(image, expectedText, decode, independent)) return { image, method: 'rebuilt square for square from the scanned code' };
+    }
+  }
   const candidates: [string, () => RawImage][] = [
     ['squared up, colour and lighting corrected, sharpened', () => sharpen(stretchLevels(evened))],
     ['squared up, colour and lighting corrected', () => stretchLevels(evened)],
@@ -382,10 +483,7 @@ export async function enhanceVerified(
   ];
   for (const [method, build] of candidates) {
     const image = build();
-    const results = await decode(image, false);
-    if (results.length === 1 && results[0].text === expectedText && independent(image) === expectedText) {
-      return { image, method };
-    }
+    if (await readsAs(image, expectedText, decode, independent)) return { image, method };
   }
   return null;
 }

@@ -237,7 +237,7 @@ describe('enhancement never changes the code', () => {
       return calls === 1 ? results : results.map((result) => ({ ...result, text: 'https://evil.example/' }));
     };
     expect(await enhanceVerified(image, TEXT, lyingDecoder, decodeIndependently)).toBeNull();
-    expect(calls).toBe(5); // the original, then all four enhancement attempts
+    expect(calls).toBeGreaterThanOrEqual(5); // the original, then every attempt, each one rejected
   });
 
   it('discards an enhancement that no longer decodes', async () => {
@@ -265,12 +265,17 @@ describe('enhancement never changes the code', () => {
     expect(await enhanceVerified(image, TEXT, decodeQrCodes, decodeIndependently)).toBeNull();
   });
 
-  it('does not turn a code into pure black and white, keeping its real shades', async () => {
+  it('draws pure black and white only when it is the original code, square for square', async () => {
     const image = renderScene(TEXT, HARD_SCENES['projector, washed out']);
     const enhanced = await enhanceVerified(cloneAll(image), TEXT, decodeQrCodes, decodeIndependently);
-    const shades = new Set<number>();
-    for (let at = 0; at < enhanced!.image.data.length; at += 4) shades.add(enhanced!.image.data[at]);
-    expect(shades.size).toBeGreaterThan(20);
+    expect(enhanced?.method).toBe('rebuilt square for square from the scanned code');
+    const original = QRCode.create(TEXT, { errorCorrectionLevel: 'M' }).modules;
+    const [read] = await decodeQrCodes(enhanced!.image, false);
+    const grid = read.grid!;
+    expect(grid.size).toBe(original.size);
+    for (let row = 0; row < grid.size; row++) {
+      for (let col = 0; col < grid.size; col++) expect(grid.dark[row * grid.size + col] === 1).toBe(!!original.get(row, col));
+    }
   });
 
   it('leaves the original pixels untouched', () => {
