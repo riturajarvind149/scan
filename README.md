@@ -18,7 +18,7 @@ The phone needs no app or pairing: anyone with your relay's link opens it and sc
 
 1. In the dashboard at `https://your-relay/admin`, choose **Create invite link** and open that link on each laptop. It offers the installer and then joins the laptop to the relay.
 2. On any phone, open `https://your-relay` and allow the camera. Bookmark it.
-3. Point the phone at any QR code. A green tick shows it was scanned and the camera holds still, so one code is only sent once; tap **Rescan** to scan again. A floating window pops up on every laptop and stays on top until you close it. It shows the code straightened, cropped and neutral in colour whenever that copy reads exactly the same as the original photo, and **Show original** switches to the photo itself.
+3. Point the phone at any QR code. A green tick shows it was scanned and the camera holds still, so one code is only sent once; tap **Rescan** to scan again. A floating window pops up on every laptop and stays on top until you close it. It shows the code as a sharp, straight black and white copy whenever that can be proven to be the very code scanned, and **Show original** switches to the photo itself.
 
 The dashboard lists the laptops, removes them, cancels the invite link, and can pause scanning.
 
@@ -106,7 +106,7 @@ It runs as a single instance, because live connections are held in that process.
 
 **The image.** To reach the laptop as fast as possible, the phone sends a photo of the code the moment it detects one: the code's real pixels from that camera frame, as a high-quality JPEG up to 1000 pixels across. It is never regenerated from the decoded text.
 
-**Enhancement.** A moment later, in the background, the phone takes the sharpest of the next few frames and tries to make a clearer copy, by squaring up the code, evening out glare, stretching contrast and sharpening edges. These keep the code's real shades and never force pixels to pure black and white. The copy is used only if two independent decoders, in their normal mode, both read it as exactly the same text as the capture; otherwise only the original is shown. When it arrives, the laptop swaps it in, labelled as checked, with a button to see the original photo.
+**Clean copy.** Within milliseconds of the scan, the phone rebuilds the code from the grid of squares the decoder read: it encodes the text again with the same version, error correction level and mask, and compares the two. The copy is used only when every difference is a misread square the code's own error correction covers, which Reed-Solomon coding guarantees only the original code can satisfy, and when two independent decoders both read it as exactly the same text. So the copy is the original code, square for square, drawn in pure black and white. It needs no second photo, so the laptop shows it almost as soon as the scan, which matters for codes that change every few seconds. When the decoder gives no grid, the phone squares up the sharpest of the next few frames and reads the grid off that instead, and failing that tries a cleaned-up photo, under the same two-decoder check; otherwise only the original is shown. The laptop shows the copy labelled as checked, with a button to see the original photo.
 
 ## Security
 
